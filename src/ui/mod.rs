@@ -19,6 +19,12 @@ pub struct Ui {
     buffer: Buffer,
 }
 
+const FONT_SIZE: f32 = 18.0;
+const LINE_HEIGHT: f32 = 24.0;
+const PADDING_X: f32 = 16.0;
+const PADDING_Y: f32 = 16.0;
+const CHAR_WIDTH_FACTOR: f32 = 0.6;
+
 impl Ui {
     pub async fn new(window: &Window) -> Self {
         let size = window.inner_size();
@@ -84,12 +90,12 @@ impl Ui {
         let text_renderer =
             TextRenderer::new(&mut text_atlas, &device, wgpu::MultisampleState::default(), None);
 
-        let mut buffer = Buffer::new(&mut font_system, Metrics::new(18.0, 24.0));
+        let mut buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         buffer.set_size(&mut font_system, size.width as f32, size.height as f32);
         buffer.set_text(
             &mut font_system,
             "",
-            Attrs::new().family(Family::SansSerif),
+            Attrs::new().family(Family::Monospace),
             Shaping::Advanced,
         );
 
@@ -127,9 +133,16 @@ impl Ui {
         self.buffer.set_text(
             &mut self.font_system,
             text,
-            Attrs::new().family(Family::SansSerif),
+            Attrs::new().family(Family::Monospace),
             Shaping::Advanced,
         );
+    }
+
+    pub fn caret_rect(&self, line: usize, col: usize) -> (f64, f64, f64, f64) {
+        let char_width = FONT_SIZE * CHAR_WIDTH_FACTOR;
+        let x = PADDING_X + (col as f32 * char_width);
+        let y = PADDING_Y + (line as f32 * LINE_HEIGHT);
+        (x as f64, y as f64, char_width as f64, LINE_HEIGHT as f64)
     }
 
     pub fn render(&mut self) -> Result<(), SurfaceError> {
@@ -153,8 +166,8 @@ impl Ui {
                 },
                 [TextArea {
                     buffer: &self.buffer,
-                    left: 16.0,
-                    top: 16.0,
+                    left: PADDING_X,
+                    top: PADDING_Y,
                     scale: 1.0,
                     bounds: TextBounds {
                         left: 0,

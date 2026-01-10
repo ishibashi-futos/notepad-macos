@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use winit::dpi::PhysicalSize;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Event, Ime, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoopBuilder};
 use winit::keyboard::{Key, NamedKey};
@@ -32,8 +32,9 @@ impl App {
         core.insert_str("Notepad prototype\nType here...");
 
         let mut ui = pollster::block_on(Ui::new(&window));
-        ui.set_text(&core.text());
+        ui.set_text(&core.display_text());
         update_title(&window, &core);
+        update_ime_cursor_area(&window, &core, &ui);
 
         let proxy = event_loop.create_proxy();
         std::thread::spawn(move || {
@@ -75,33 +76,63 @@ impl App {
                         }
                         WindowEvent::Ime(ime) => {
                             log_ime_event(&ime);
+                            match ime {
+                                Ime::Enabled => {
+                                    update_ime_cursor_area(&window, &core, &ui);
+                                }
+                                Ime::Disabled => {
+                                    core.clear_preedit();
+                                }
+                                Ime::Preedit(text, cursor) => {
+                                    core.set_preedit(text, cursor);
+                                }
+                                Ime::Commit(text) => {
+                                    core.commit_preedit(&text);
+                                }
+                            }
+                            ui.set_text(&core.display_text());
+                            update_title(&window, &core);
+                            update_ime_cursor_area(&window, &core, &ui);
+                            needs_redraw = true;
                         }
                         WindowEvent::KeyboardInput { event, .. } => {
                             if event.state == ElementState::Pressed {
                                 let mut changed = false;
+                                let command_key =
+                                    modifiers.super_key() || modifiers.control_key();
                                 match event.logical_key {
+                                    Key::Character(ref ch)
+                                        if command_key && ch.eq_ignore_ascii_case("z") =>
+                                    {
+                                        if modifiers.shift_key() {
+                                            changed = core.redo();
+                                        } else {
+                                            changed = core.undo();
+                                        }
+                                    }
+                                    Key::Character(ref ch)
+                                        if command_key && ch.eq_ignore_ascii_case("y") =>
+                                    {
+                                        changed = core.redo();
+                                    }
                                     Key::Named(NamedKey::Backspace) => {
                                         core.backspace();
                                         changed = true;
                                     }
                                     Key::Named(NamedKey::ArrowLeft) => {
-                                        core.move_left();
-                                        changed = true;
+                                        changed = move_cursor(&mut core, Direction::Left, modifiers.shift_key());
                                     }
                                     Key::Named(NamedKey::ArrowRight) => {
-                                        core.move_right();
-                                        changed = true;
+                                        changed = move_cursor(&mut core, Direction::Right, modifiers.shift_key());
                                     }
                                     Key::Named(NamedKey::ArrowUp) => {
-                                        core.move_up();
-                                        changed = true;
+                                        changed = move_cursor(&mut core, Direction::Up, modifiers.shift_key());
                                     }
                                     Key::Named(NamedKey::ArrowDown) => {
-                                        core.move_down();
-                                        changed = true;
+                                        changed = move_cursor(&mut core, Direction::Down, modifiers.shift_key());
                                     }
                                     Key::Named(NamedKey::Enter) => {
-                                        core.insert_char('\n');
+                                        core.insert_str("\n");
                                         changed = true;
                                     }
                                     _ => {}
@@ -120,8 +151,9 @@ impl App {
                                 }
 
                                 if changed {
-                                    ui.set_text(&core.text());
+                                    ui.set_text(&core.display_text());
                                     update_title(&window, &core);
+                                    update_ime_cursor_area(&window, &core, &ui);
                                     needs_redraw = true;
                                 }
                             }
@@ -161,6 +193,35 @@ fn update_title(window: &winit::window::Window, core: &Core) {
         cursor.line + 1,
         cursor.col + 1
     ));
+}
+
+fn update_ime_cursor_area(window: &winit::window::Window, core: &Core, ui: &Ui) {
+    let cursor = core.cursor_for_char(core.ime_cursor_char());
+    let (x, y, w, h) = ui.caret_rect(cursor.line, cursor.col);
+    window.set_ime_cursor_area(
+        PhysicalPosition::new(x, y),
+        PhysicalSize::new(w as u32, h as u32),
+    );
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+fn move_cursor(core: &mut Core, direction: Direction, extend: bool) -> bool {
+    let before_cursor = core.cursor();
+    let before_selection = core.selection_range();
+    match direction {
+        Direction::Left => core.move_left(extend),
+        Direction::Right => core.move_right(extend),
+        Direction::Up => core.move_up(extend),
+        Direction::Down => core.move_down(extend),
+    }
+    core.cursor() != before_cursor || core.selection_range() != before_selection
 }
 
 fn log_ime_event(ime: &Ime) {
