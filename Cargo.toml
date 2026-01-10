@@ -1,0 +1,10 @@
+[package]
+name = "notepad-macos"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+wgpu = "0.19"
+winit = "0.29"
+glyphon = "0.5"
+pollster = "0.3"
