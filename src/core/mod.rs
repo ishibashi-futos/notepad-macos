@@ -1,9 +1,108 @@
+use std::path::{Path, PathBuf};
+
+use encoding_rs::{Encoding, SHIFT_JIS, UTF_16BE, UTF_16LE, UTF_8};
 use ropey::Rope;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Cursor {
     pub line: usize,
     pub col: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextEncoding {
+    Utf8,
+    Utf16Le,
+    Utf16Be,
+    ShiftJis,
+}
+
+impl TextEncoding {
+    pub fn label(self) -> &'static str {
+        match self {
+            TextEncoding::Utf8 => "UTF-8",
+            TextEncoding::Utf16Le => "UTF-16LE",
+            TextEncoding::Utf16Be => "UTF-16BE",
+            TextEncoding::ShiftJis => "Shift_JIS",
+        }
+    }
+
+    pub fn encoding(self) -> &'static Encoding {
+        match self {
+            TextEncoding::Utf8 => UTF_8,
+            TextEncoding::Utf16Le => UTF_16LE,
+            TextEncoding::Utf16Be => UTF_16BE,
+            TextEncoding::ShiftJis => SHIFT_JIS,
+        }
+    }
+
+    pub fn bom(self) -> &'static [u8] {
+        match self {
+            TextEncoding::Utf8 => &[],
+            TextEncoding::Utf16Le => &[0xFF, 0xFE],
+            TextEncoding::Utf16Be => &[0xFE, 0xFF],
+            TextEncoding::ShiftJis => &[],
+        }
+    }
+
+    pub fn from_encoding(encoding: &'static Encoding) -> Option<Self> {
+        if encoding == UTF_8 {
+            Some(TextEncoding::Utf8)
+        } else if encoding == UTF_16LE {
+            Some(TextEncoding::Utf16Le)
+        } else if encoding == UTF_16BE {
+            Some(TextEncoding::Utf16Be)
+        } else if encoding == SHIFT_JIS {
+            Some(TextEncoding::ShiftJis)
+        } else {
+            None
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            TextEncoding::Utf8 => TextEncoding::Utf16Le,
+            TextEncoding::Utf16Le => TextEncoding::Utf16Be,
+            TextEncoding::Utf16Be => TextEncoding::ShiftJis,
+            TextEncoding::ShiftJis => TextEncoding::Utf8,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub enum CoreError {
+    System(SystemError),
+    Domain(DomainError),
+}
+
+#[derive(Debug)]
+pub struct SystemError {
+    pub kind: SystemErrorKind,
+    pub context: String,
+    pub retriable: bool,
+}
+
+#[derive(Debug)]
+pub enum SystemErrorKind {
+    Io,
+    Permission,
+    Encoding,
+    Os,
+    Unknown,
+}
+
+#[derive(Debug)]
+pub struct DomainError {
+    pub kind: DomainErrorKind,
+    pub context: String,
+}
+
+#[derive(Debug)]
+pub enum DomainErrorKind {
+    InvalidOperation,
+    InvalidState,
+    OutOfRange,
+    EmptySelection,
 }
 
 #[derive(Debug, Clone)]
@@ -37,6 +136,9 @@ pub struct Core {
     preedit: Option<Preedit>,
     undo: Vec<Edit>,
     redo: Vec<Edit>,
+    path: Option<PathBuf>,
+    encoding: TextEncoding,
+    dirty: bool,
 }
 
 impl Core {
@@ -48,6 +150,9 @@ impl Core {
             preedit: None,
             undo: Vec::new(),
             redo: Vec::new(),
+            path: None,
+            encoding: TextEncoding::Utf8,
+            dirty: false,
         }
     }
 
@@ -105,6 +210,18 @@ impl Core {
         })
     }
 
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
+    pub fn encoding(&self) -> TextEncoding {
+        self.encoding
+    }
+
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     pub fn set_preedit(&mut self, text: String, cursor: Option<(usize, usize)>) {
         if text.is_empty() {
             self.preedit = None;
@@ -158,6 +275,7 @@ impl Core {
         };
         self.selection_anchor = None;
         self.push_undo(edit);
+        self.dirty = true;
     }
 
     pub fn backspace(&mut self) {
@@ -188,6 +306,7 @@ impl Core {
         };
         self.selection_anchor = None;
         self.push_undo(edit);
+        self.dirty = true;
     }
 
     pub fn move_left(&mut self, extend: bool) {
@@ -237,6 +356,7 @@ impl Core {
         };
         self.apply_edit(&edit, false);
         self.redo.push(edit);
+        self.dirty = true;
         true
     }
 
@@ -247,7 +367,46 @@ impl Core {
         };
         self.apply_edit(&edit, true);
         self.undo.push(edit);
+        self.dirty = true;
         true
+    }
+
+    pub fn load_from_bytes(&mut self, bytes: &[u8]) -> Result<TextEncoding, CoreError> {
+        let (encoding, bom_len) = Encoding::for_bom(bytes).unwrap_or((UTF_8, 0));
+        let encoding = TextEncoding::from_encoding(encoding).unwrap_or(TextEncoding::Utf8);
+        let payload = &bytes[bom_len..];
+        let (decoded, _, _) = encoding.encoding().decode(payload);
+        self.rope = Rope::from_str(decoded.as_ref());
+        self.cursor = 0;
+        self.selection_anchor = None;
+        self.preedit = None;
+        self.undo.clear();
+        self.redo.clear();
+        self.encoding = encoding;
+        self.dirty = false;
+        Ok(encoding)
+    }
+
+    pub fn encode_text(text: &str, encoding: TextEncoding) -> Vec<u8> {
+        let mut output = Vec::new();
+        output.extend_from_slice(encoding.bom());
+        let (encoded, _, _) = encoding.encoding().encode(text);
+        output.extend_from_slice(encoded.as_ref());
+        output
+    }
+
+    pub fn mark_saved(&mut self, path: PathBuf, encoding: TextEncoding) {
+        self.path = Some(path);
+        self.encoding = encoding;
+        self.dirty = false;
+    }
+
+    pub fn set_path(&mut self, path: Option<PathBuf>) {
+        self.path = path;
+    }
+
+    pub fn set_encoding(&mut self, encoding: TextEncoding) {
+        self.encoding = encoding;
     }
 
     fn push_undo(&mut self, edit: Edit) {
@@ -314,6 +473,30 @@ impl Core {
         } else {
             edit.cursor_before
         };
+    }
+}
+
+impl CoreError {
+    pub fn from_io(context: impl Into<String>, err: std::io::Error) -> Self {
+        let kind = match err.kind() {
+            std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::AlreadyExists
+            | std::io::ErrorKind::PermissionDenied => SystemErrorKind::Permission,
+            std::io::ErrorKind::InvalidData | std::io::ErrorKind::InvalidInput => {
+                SystemErrorKind::Encoding
+            }
+            _ => SystemErrorKind::Io,
+        };
+        CoreError::System(SystemError {
+            kind,
+            context: format!("{}: {}", context.into(), err),
+            retriable: matches!(
+                err.kind(),
+                std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::TimedOut
+            ),
+        })
     }
 }
 

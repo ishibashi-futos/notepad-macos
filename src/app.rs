@@ -1,17 +1,29 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Event, Ime, WindowEvent};
-use winit::event_loop::{ControlFlow, EventLoopBuilder};
+use winit::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::WindowBuilder;
 
-use crate::core::Core;
+use crate::core::{Core, CoreError, TextEncoding};
 use crate::ui::Ui;
 
 #[derive(Debug)]
 enum AppEvent {
     BackgroundTick(u64),
+    OpenResult {
+        request_id: u64,
+        path: PathBuf,
+        result: Result<Vec<u8>, CoreError>,
+    },
+    SaveResult {
+        request_id: u64,
+        path: PathBuf,
+        encoding: TextEncoding,
+        result: Result<(), CoreError>,
+    },
 }
 
 pub struct App;
@@ -37,10 +49,11 @@ impl App {
         update_ime_cursor_area(&window, &core, &ui);
 
         let proxy = event_loop.create_proxy();
+        let bg_proxy = proxy.clone();
         std::thread::spawn(move || {
             for tick in 0.. {
                 std::thread::sleep(Duration::from_secs(2));
-                if proxy.send_event(AppEvent::BackgroundTick(tick)).is_err() {
+                if bg_proxy.send_event(AppEvent::BackgroundTick(tick)).is_err() {
                     break;
                 }
             }
@@ -48,12 +61,57 @@ impl App {
 
         let mut needs_redraw = true;
         let mut modifiers = winit::keyboard::ModifiersState::default();
+        let mut next_request_id: u64 = 1;
+        let mut active_open_request: Option<u64> = None;
+        let mut active_save_request: Option<u64> = None;
 
         let result = event_loop.run(move |event, elwt| {
             elwt.set_control_flow(ControlFlow::Wait);
             match event {
                 Event::UserEvent(AppEvent::BackgroundTick(tick)) => {
                     println!("[bg] tick={tick}");
+                }
+                Event::UserEvent(AppEvent::OpenResult {
+                    request_id,
+                    path,
+                    result,
+                }) => {
+                    if active_open_request != Some(request_id) {
+                        return;
+                    }
+                    active_open_request = None;
+                    match result {
+                        Ok(bytes) => match core.load_from_bytes(&bytes) {
+                            Ok(_) => {
+                                core.set_path(Some(path));
+                                ui.set_text(&core.display_text());
+                                update_title(&window, &core);
+                                update_ime_cursor_area(&window, &core, &ui);
+                                needs_redraw = true;
+                            }
+                            Err(err) => report_error(&err),
+                        },
+                        Err(err) => report_error(&err),
+                    }
+                }
+                Event::UserEvent(AppEvent::SaveResult {
+                    request_id,
+                    path,
+                    encoding,
+                    result,
+                }) => {
+                    if active_save_request != Some(request_id) {
+                        return;
+                    }
+                    active_save_request = None;
+                    match result {
+                        Ok(()) => {
+                            core.mark_saved(path, encoding);
+                            update_title(&window, &core);
+                            needs_redraw = true;
+                        }
+                        Err(err) => report_error(&err),
+                    }
                 }
                 Event::WindowEvent { event, window_id } if window_id == window.id() => {
                     match event {
@@ -102,6 +160,56 @@ impl App {
                                     modifiers.super_key() || modifiers.control_key();
                                 match event.logical_key {
                                     Key::Character(ref ch)
+                                        if command_key && ch.eq_ignore_ascii_case("o") =>
+                                    {
+                                        if let Some(path) = pick_open_path() {
+                                            let request_id = next_request_id;
+                                            next_request_id += 1;
+                                            active_open_request = Some(request_id);
+                                            start_open_task(proxy.clone(), request_id, path);
+                                        }
+                                    }
+                                    Key::Character(ref ch)
+                                        if command_key && ch.eq_ignore_ascii_case("s") =>
+                                    {
+                                        if modifiers.shift_key() {
+                                            if let Some(path) = pick_save_path(core.path()) {
+                                                let request_id = next_request_id;
+                                                next_request_id += 1;
+                                                active_save_request = Some(request_id);
+                                                start_save_task(
+                                                    proxy.clone(),
+                                                    request_id,
+                                                    path,
+                                                    core.encoding(),
+                                                    core.text(),
+                                                );
+                                            }
+                                        } else if let Some(path) = core.path().map(PathBuf::from) {
+                                            let request_id = next_request_id;
+                                            next_request_id += 1;
+                                            active_save_request = Some(request_id);
+                                            start_save_task(
+                                                proxy.clone(),
+                                                request_id,
+                                                path,
+                                                core.encoding(),
+                                                core.text(),
+                                            );
+                                        } else if let Some(path) = pick_save_path(core.path()) {
+                                            let request_id = next_request_id;
+                                            next_request_id += 1;
+                                            active_save_request = Some(request_id);
+                                            start_save_task(
+                                                proxy.clone(),
+                                                request_id,
+                                                path,
+                                                core.encoding(),
+                                                core.text(),
+                                            );
+                                        }
+                                    }
+                                    Key::Character(ref ch)
                                         if command_key && ch.eq_ignore_ascii_case("z") =>
                                     {
                                         if modifiers.shift_key() {
@@ -115,21 +223,65 @@ impl App {
                                     {
                                         changed = core.redo();
                                     }
+                                    Key::Character(ref ch)
+                                        if command_key && modifiers.shift_key()
+                                            && ch.eq_ignore_ascii_case("e") =>
+                                    {
+                                        core.set_encoding(core.encoding().next());
+                                        update_title(&window, &core);
+                                    }
+                                    Key::Character(ref ch)
+                                        if command_key && ch == "1" =>
+                                    {
+                                        core.set_encoding(TextEncoding::Utf8);
+                                        update_title(&window, &core);
+                                    }
+                                    Key::Character(ref ch)
+                                        if command_key && ch == "2" =>
+                                    {
+                                        core.set_encoding(TextEncoding::Utf16Le);
+                                        update_title(&window, &core);
+                                    }
+                                    Key::Character(ref ch)
+                                        if command_key && ch == "3" =>
+                                    {
+                                        core.set_encoding(TextEncoding::Utf16Be);
+                                        update_title(&window, &core);
+                                    }
+                                    Key::Character(ref ch)
+                                        if command_key && ch == "4" =>
+                                    {
+                                        core.set_encoding(TextEncoding::ShiftJis);
+                                        update_title(&window, &core);
+                                    }
                                     Key::Named(NamedKey::Backspace) => {
                                         core.backspace();
                                         changed = true;
                                     }
                                     Key::Named(NamedKey::ArrowLeft) => {
-                                        changed = move_cursor(&mut core, Direction::Left, modifiers.shift_key());
+                                        changed = move_cursor(
+                                            &mut core,
+                                            Direction::Left,
+                                            modifiers.shift_key(),
+                                        );
                                     }
                                     Key::Named(NamedKey::ArrowRight) => {
-                                        changed = move_cursor(&mut core, Direction::Right, modifiers.shift_key());
+                                        changed = move_cursor(
+                                            &mut core,
+                                            Direction::Right,
+                                            modifiers.shift_key(),
+                                        );
                                     }
                                     Key::Named(NamedKey::ArrowUp) => {
-                                        changed = move_cursor(&mut core, Direction::Up, modifiers.shift_key());
+                                        changed =
+                                            move_cursor(&mut core, Direction::Up, modifiers.shift_key());
                                     }
                                     Key::Named(NamedKey::ArrowDown) => {
-                                        changed = move_cursor(&mut core, Direction::Down, modifiers.shift_key());
+                                        changed = move_cursor(
+                                            &mut core,
+                                            Direction::Down,
+                                            modifiers.shift_key(),
+                                        );
                                     }
                                     Key::Named(NamedKey::Enter) => {
                                         core.insert_str("\n");
@@ -186,10 +338,63 @@ impl App {
     }
 }
 
+fn pick_open_path() -> Option<PathBuf> {
+    rfd::FileDialog::new().pick_file()
+}
+
+fn pick_save_path(current_path: Option<&std::path::Path>) -> Option<PathBuf> {
+    let dialog = rfd::FileDialog::new();
+    let dialog = if let Some(path) = current_path {
+        dialog.set_directory(path.parent().unwrap_or(path))
+    } else {
+        dialog
+    };
+    dialog.save_file()
+}
+
+fn start_open_task(proxy: EventLoopProxy<AppEvent>, request_id: u64, path: PathBuf) {
+    std::thread::spawn(move || {
+        let result = std::fs::read(&path)
+            .map_err(|err| CoreError::from_io(format!("read {}", path.display()), err));
+        let _ = proxy.send_event(AppEvent::OpenResult {
+            request_id,
+            path,
+            result,
+        });
+    });
+}
+
+fn start_save_task(
+    proxy: EventLoopProxy<AppEvent>,
+    request_id: u64,
+    path: PathBuf,
+    encoding: TextEncoding,
+    text: String,
+) {
+    std::thread::spawn(move || {
+        let bytes = Core::encode_text(&text, encoding);
+        let result = std::fs::write(&path, bytes)
+            .map_err(|err| CoreError::from_io(format!("write {}", path.display()), err));
+        let _ = proxy.send_event(AppEvent::SaveResult {
+            request_id,
+            path,
+            encoding,
+            result,
+        });
+    });
+}
+
 fn update_title(window: &winit::window::Window, core: &Core) {
+    let name = core
+        .path()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("Untitled");
+    let dirty = if core.is_dirty() { "*" } else { "" };
     let cursor = core.cursor();
     window.set_title(&format!(
-        "Notepad Prototype (Ln {}, Col {})",
+        "{name}{dirty} — {} (Ln {}, Col {})",
+        core.encoding().label(),
         cursor.line + 1,
         cursor.col + 1
     ));
@@ -233,4 +438,8 @@ fn log_ime_event(ime: &Ime) {
         }
         Ime::Commit(text) => println!("[ime] commit text={text:?}"),
     }
+}
+
+fn report_error(err: &CoreError) {
+    eprintln!("{:?}", err);
 }
