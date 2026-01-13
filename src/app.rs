@@ -603,6 +603,12 @@ impl App {
                                         search_preedit = None;
                                     }
                                     Key::Character(ref ch)
+                                        if command_key && ch.eq_ignore_ascii_case("a") =>
+                                    {
+                                        let doc = &mut documents[active_doc_index];
+                                        changed = doc.core.select_all();
+                                    }
+                                    Key::Character(ref ch)
                                         if command_key && ch.eq_ignore_ascii_case("w") =>
                                     {
                                         close_current_tab(

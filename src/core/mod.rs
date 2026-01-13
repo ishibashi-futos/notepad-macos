@@ -146,6 +146,7 @@ pub struct Core {
 
 impl Core {
     const PLACEHOLDER_TEXT: &'static str = "Type here...";
+    const UNDO_LIMIT: usize = 100;
 
     pub fn new() -> Self {
         Self {
@@ -295,6 +296,20 @@ impl Core {
         } else {
             (self.cursor, anchor)
         })
+    }
+
+    pub fn select_all(&mut self) -> bool {
+        let before_cursor = self.cursor;
+        let before_selection = self.selection_range();
+        let total_chars = self.rope.len_chars();
+        if total_chars == 0 {
+            self.selection_anchor = None;
+            self.cursor = 0;
+        } else {
+            self.selection_anchor = Some(0);
+            self.cursor = total_chars;
+        }
+        self.cursor != before_cursor || self.selection_range() != before_selection
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -454,6 +469,7 @@ impl Core {
         };
         self.apply_edit(&edit, true);
         self.undo.push(edit);
+        self.trim_undo_history();
         self.dirty = true;
         true
     }
@@ -498,7 +514,16 @@ impl Core {
 
     fn push_undo(&mut self, edit: Edit) {
         self.undo.push(edit);
+        self.trim_undo_history();
         self.redo.clear();
+    }
+
+    fn trim_undo_history(&mut self) {
+        if self.undo.len() <= Self::UNDO_LIMIT {
+            return;
+        }
+        let overflow = self.undo.len() - Self::UNDO_LIMIT;
+        self.undo.drain(0..overflow);
     }
 
     fn set_cursor(&mut self, next: usize, extend: bool) {
@@ -725,5 +750,37 @@ mod tests {
         assert_eq!(core.find_prev("abc", 0), Some(8));
         assert_eq!(core.find_prev("abc", 8), Some(0));
         assert_eq!(core.find_prev("abc", 9), Some(8));
+    }
+
+    #[test]
+    fn select_all_on_empty_is_noop() {
+        let mut core = Core::new();
+        assert!(!core.select_all());
+        assert_eq!(core.selection_range(), None);
+        assert_eq!(core.cursor_char(), 0);
+    }
+
+    #[test]
+    fn select_all_selects_full_range() {
+        let mut core = Core::new();
+        core.insert_str("a\nbc");
+        assert!(core.select_all());
+        let len = core.text().chars().count();
+        assert_eq!(core.selection_range(), Some((0, len)));
+        assert_eq!(core.cursor_char(), len);
+        assert!(!core.select_all());
+    }
+
+    #[test]
+    fn undo_history_is_capped() {
+        let mut core = Core::new();
+        for _ in 0..101 {
+            core.insert_str("a");
+        }
+        for _ in 0..Core::UNDO_LIMIT {
+            assert!(core.undo());
+        }
+        assert!(!core.undo());
+        assert_eq!(core.text(), "a");
     }
 }
