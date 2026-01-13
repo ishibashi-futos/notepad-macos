@@ -65,7 +65,17 @@ impl App {
         let mut documents = vec![Document::new(next_doc_id)];
         next_doc_id += 1;
         let mut active_doc_index: usize = 0;
-        refresh_ui(&mut ui, &documents, active_doc_index);
+        let mut search_query = String::new();
+        let mut search_active = false;
+        let mut search_preedit: Option<String> = None;
+        refresh_ui(
+            &mut ui,
+            &documents,
+            active_doc_index,
+            &search_query,
+            search_preedit.as_deref(),
+            search_active,
+        );
         update_title(&window, &documents[active_doc_index].core);
         update_ime_cursor_area(&window, &documents[active_doc_index].core, &ui);
 
@@ -125,7 +135,14 @@ impl App {
                         Err(err) => report_error(&err),
                     }
                     if refresh_active {
-                        refresh_ui(&mut ui, &documents, active_doc_index);
+                        refresh_ui(
+                            &mut ui,
+                            &documents,
+                            active_doc_index,
+                            &search_query,
+                            search_preedit.as_deref(),
+                            search_active,
+                        );
                         let doc = &documents[active_doc_index];
                         update_title(&window, &doc.core);
                         update_ime_cursor_area(&window, &doc.core, &ui);
@@ -213,6 +230,9 @@ impl App {
                                                 &mut ui,
                                                 &documents,
                                                 active_doc_index,
+                                                &search_query,
+                                                search_preedit.as_deref(),
+                                                search_active,
                                             );
                                             let doc = &documents[active_doc_index];
                                             update_title(&window, &doc.core);
@@ -229,36 +249,120 @@ impl App {
                         }
                         WindowEvent::Ime(ime) => {
                             log_ime_event(&ime);
-                            {
-                                let doc = &mut documents[active_doc_index];
+                            if search_active {
                                 match ime {
-                                    Ime::Enabled => {
-                                        update_ime_cursor_area(&window, &doc.core, &ui);
-                                    }
+                                    Ime::Enabled => {}
                                     Ime::Disabled => {
-                                        doc.core.clear_preedit();
+                                        search_preedit = None;
                                     }
-                                    Ime::Preedit(text, cursor) => {
-                                        doc.core.set_preedit(text, cursor);
+                                    Ime::Preedit(text, _) => {
+                                        if text.is_empty() {
+                                            search_preedit = None;
+                                        } else {
+                                            search_preedit = Some(text);
+                                        }
                                     }
                                     Ime::Commit(text) => {
-                                        doc.core.commit_preedit(&text);
+                                        if !text.is_empty() {
+                                            search_query.push_str(&text);
+                                        }
+                                        search_preedit = None;
                                     }
                                 }
+                                let search_text = build_search_bar_text(
+                                    &search_query,
+                                    search_preedit.as_deref(),
+                                );
+                                ui.set_search(&search_text, true);
+                                needs_redraw = true;
+                            } else {
+                                {
+                                    let doc = &mut documents[active_doc_index];
+                                    match ime {
+                                        Ime::Enabled => {
+                                            update_ime_cursor_area(&window, &doc.core, &ui);
+                                        }
+                                        Ime::Disabled => {
+                                            doc.core.clear_preedit();
+                                        }
+                                        Ime::Preedit(text, cursor) => {
+                                            doc.core.set_preedit(text, cursor);
+                                        }
+                                        Ime::Commit(text) => {
+                                            doc.core.commit_preedit(&text);
+                                        }
+                                    }
+                                }
+                                refresh_ui(
+                                    &mut ui,
+                                    &documents,
+                                    active_doc_index,
+                                    &search_query,
+                                    search_preedit.as_deref(),
+                                    search_active,
+                                );
+                                let doc = &documents[active_doc_index];
+                                update_title(&window, &doc.core);
+                                update_ime_cursor_area(&window, &doc.core, &ui);
+                                needs_redraw = true;
                             }
-                            refresh_ui(&mut ui, &documents, active_doc_index);
-                            let doc = &documents[active_doc_index];
-                            update_title(&window, &doc.core);
-                            update_ime_cursor_area(&window, &doc.core, &ui);
-                            needs_redraw = true;
                         }
                         WindowEvent::KeyboardInput { event, .. } => {
                             if event.state == ElementState::Pressed {
                                 let mut changed = false;
+                                let mut search_dirty = false;
+                                let mut suppress_editor_input = search_active;
                                 let command_key =
                                     modifiers.super_key() || modifiers.control_key();
                                 let doc_id = documents[active_doc_index].id;
-                                match event.logical_key {
+                                if search_active {
+                                    match event.logical_key {
+                                        Key::Named(NamedKey::Escape) => {
+                                            search_active = false;
+                                            search_query.clear();
+                                            search_preedit = None;
+                                            search_dirty = true;
+                                            suppress_editor_input = true;
+                                        }
+                                        Key::Named(NamedKey::Enter) => {
+                                            if search_preedit.is_none() && !search_query.is_empty() {
+                                                let doc = &mut documents[active_doc_index];
+                                                let start = doc.core.cursor_char().saturating_add(1);
+                                                if let Some(idx) =
+                                                    doc.core.find_next(&search_query, start)
+                                                {
+                                                    let cursor = doc.core.cursor_for_char(idx);
+                                                    changed = doc
+                                                        .core
+                                                        .set_cursor_line_col(cursor.line, cursor.col, false);
+                                                }
+                                            }
+                                            suppress_editor_input = true;
+                                        }
+                                        Key::Named(NamedKey::Backspace) => {
+                                            if search_preedit.is_none() {
+                                                search_query.pop();
+                                                search_dirty = true;
+                                            }
+                                            suppress_editor_input = true;
+                                        }
+                                        _ => {}
+                                    }
+                                    if let Some(text) = event.text.as_ref() {
+                                        if !command_key
+                                            && !modifiers.alt_key()
+                                            && !modifiers.super_key()
+                                        {
+                                            if !text.is_empty()
+                                                && text.chars().all(|ch| !ch.is_control())
+                                            {
+                                                search_query.push_str(text);
+                                                search_dirty = true;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    match event.logical_key {
                                     Key::Character(ref ch)
                                         if command_key && ch.eq_ignore_ascii_case("o") =>
                                     {
@@ -341,7 +445,14 @@ impl App {
                                             &mut active_doc_index,
                                             last_index,
                                         );
-                                        refresh_ui(&mut ui, &documents, active_doc_index);
+                                        refresh_ui(
+                                            &mut ui,
+                                            &documents,
+                                            active_doc_index,
+                                            &search_query,
+                                            search_preedit.as_deref(),
+                                            search_active,
+                                        );
                                         update_title(
                                             &window,
                                             &documents[active_doc_index].core,
@@ -354,13 +465,27 @@ impl App {
                                         needs_redraw = true;
                                     }
                                     Key::Character(ref ch)
+                                        if command_key && ch.eq_ignore_ascii_case("f") =>
+                                    {
+                                        search_active = true;
+                                        search_dirty = true;
+                                        search_preedit = None;
+                                    }
+                                    Key::Character(ref ch)
                                         if command_key && ch.eq_ignore_ascii_case("w") =>
                                     {
                                         close_current_tab(
                                             &mut documents,
                                             &mut active_doc_index,
                                         );
-                                        refresh_ui(&mut ui, &documents, active_doc_index);
+                                        refresh_ui(
+                                            &mut ui,
+                                            &documents,
+                                            active_doc_index,
+                                            &search_query,
+                                            search_preedit.as_deref(),
+                                            search_active,
+                                        );
                                         update_title(
                                             &window,
                                             &documents[active_doc_index].core,
@@ -385,7 +510,14 @@ impl App {
                                             &mut active_doc_index,
                                             next_index,
                                         );
-                                        refresh_ui(&mut ui, &documents, active_doc_index);
+                                        refresh_ui(
+                                            &mut ui,
+                                            &documents,
+                                            active_doc_index,
+                                            &search_query,
+                                            search_preedit.as_deref(),
+                                            search_active,
+                                        );
                                         update_title(
                                             &window,
                                             &documents[active_doc_index].core,
@@ -407,7 +539,14 @@ impl App {
                                             &mut active_doc_index,
                                             next_index,
                                         );
-                                        refresh_ui(&mut ui, &documents, active_doc_index);
+                                        refresh_ui(
+                                            &mut ui,
+                                            &documents,
+                                            active_doc_index,
+                                            &search_query,
+                                            search_preedit.as_deref(),
+                                            search_active,
+                                        );
                                         update_title(
                                             &window,
                                             &documents[active_doc_index].core,
@@ -433,6 +572,9 @@ impl App {
                                                     &mut ui,
                                                     &documents,
                                                     active_doc_index,
+                                                    &search_query,
+                                                    search_preedit.as_deref(),
+                                                    search_active,
                                                 );
                                                 update_title(
                                                     &window,
@@ -542,8 +684,9 @@ impl App {
                                     }
                                     _ => {}
                                 }
+                                }
 
-                                if !changed {
+                                if !search_active && !changed && !suppress_editor_input {
                                     if let Some(text) = event.text.as_ref() {
                                         if !modifiers.control_key()
                                             && !modifiers.alt_key()
@@ -555,8 +698,25 @@ impl App {
                                     }
                                 }
 
+                                if search_dirty {
+                                    let search_text = build_search_bar_text(
+                                        &search_query,
+                                        search_preedit.as_deref(),
+                                    );
+                                    let visible = search_active || !search_query.is_empty();
+                                    ui.set_search(&search_text, visible);
+                                    needs_redraw = true;
+                                }
+
                                 if changed {
-                                    refresh_ui(&mut ui, &documents, active_doc_index);
+                                    refresh_ui(
+                                        &mut ui,
+                                        &documents,
+                                        active_doc_index,
+                                        &search_query,
+                                        search_preedit.as_deref(),
+                                        search_active,
+                                    );
                                     let doc = &documents[active_doc_index];
                                     update_title(&window, &doc.core);
                                     update_ime_cursor_area(&window, &doc.core, &ui);
@@ -662,11 +822,21 @@ fn update_title(window: &winit::window::Window, core: &Core) {
     ));
 }
 
-fn refresh_ui(ui: &mut Ui, documents: &[Document], active_doc_index: usize) {
+fn refresh_ui(
+    ui: &mut Ui,
+    documents: &[Document],
+    active_doc_index: usize,
+    search_query: &str,
+    search_preedit: Option<&str>,
+    search_active: bool,
+) {
     let core = &documents[active_doc_index].core;
     let (line_numbers, digits) = build_line_numbers_text(core.line_count());
     ui.set_line_numbers(&line_numbers, digits);
     ui.set_text(&core.display_text());
+    let search_text = build_search_bar_text(search_query, search_preedit);
+    let visible = search_active || !search_query.is_empty();
+    ui.set_search(&search_text, visible);
     refresh_tabs(ui, documents, active_doc_index);
 }
 
@@ -700,6 +870,18 @@ fn build_line_numbers_text(line_count: usize) -> (String, usize) {
         text.push_str(&format!("{line:>width$}", width = digits));
     }
     (text, digits)
+}
+
+fn build_search_bar_text(query: &str, preedit: Option<&str>) -> String {
+    let mut text = String::from("Search:");
+    if !query.is_empty() || preedit.is_some() {
+        text.push(' ');
+        text.push_str(query);
+        if let Some(preedit) = preedit {
+            text.push_str(preedit);
+        }
+    }
+    text
 }
 
 fn doc_label(doc: &Document) -> String {
@@ -830,5 +1012,13 @@ mod tests {
         assert_eq!(lines[0], " 1");
         assert_eq!(lines[8], " 9");
         assert_eq!(lines[11], "12");
+    }
+
+    #[test]
+    fn build_search_bar_text_formats_query() {
+        assert_eq!(build_search_bar_text("", None), "Search:");
+        assert_eq!(build_search_bar_text("abc", None), "Search: abc");
+        assert_eq!(build_search_bar_text("", Some("かな")), "Search: かな");
+        assert_eq!(build_search_bar_text("ab", Some("c")), "Search: abc");
     }
 }

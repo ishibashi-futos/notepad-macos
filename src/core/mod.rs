@@ -203,6 +203,10 @@ impl Core {
         self.cursor_for_char(self.cursor)
     }
 
+    pub fn cursor_char(&self) -> usize {
+        self.cursor
+    }
+
     pub fn cursor_for_char(&self, char_idx: usize) -> Cursor {
         let total_chars = self.rope.len_chars();
         if total_chars == 0 {
@@ -218,6 +222,25 @@ impl Core {
         let line_start = self.rope.line_to_char(line);
         let col = char_idx.saturating_sub(line_start);
         Cursor { line, col }
+    }
+
+    pub fn find_next(&self, query: &str, start: usize) -> Option<usize> {
+        if query.is_empty() {
+            return None;
+        }
+        let text = self.rope.to_string();
+        if text.is_empty() {
+            return None;
+        }
+        let total_chars = text.chars().count();
+        let start = start.min(total_chars);
+        if let Some(idx) = find_in_text(&text, query, start) {
+            return Some(idx);
+        }
+        if start > 0 {
+            return find_in_text(&text, query, 0);
+        }
+        None
     }
 
     pub fn ime_cursor_char(&self) -> usize {
@@ -568,6 +591,16 @@ fn char_to_byte_idx(text: &str, char_idx: usize) -> usize {
         .unwrap_or_else(|| text.len())
 }
 
+fn find_in_text(text: &str, query: &str, start_char: usize) -> Option<usize> {
+    let start_byte = char_to_byte_idx(text, start_char);
+    if start_byte > text.len() {
+        return None;
+    }
+    let found = text[start_byte..].find(query)?;
+    let byte_idx = start_byte + found;
+    Some(text[..byte_idx].chars().count())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -611,5 +644,21 @@ mod tests {
         assert_eq!(core.cursor(), Cursor { line: 1, col: 1 });
         assert!(core.set_cursor_line_col(9, 9, false));
         assert_eq!(core.cursor(), Cursor { line: 1, col: 2 });
+    }
+
+    #[test]
+    fn find_next_wraps_and_skips_start() {
+        let mut core = Core::new();
+        core.insert_str("abc def abc");
+        assert_eq!(core.find_next("abc", 0), Some(0));
+        assert_eq!(core.find_next("abc", 1), Some(8));
+        assert_eq!(core.find_next("abc", 9), Some(0));
+    }
+
+    #[test]
+    fn find_next_returns_none_on_empty_query() {
+        let mut core = Core::new();
+        core.insert_str("abc");
+        assert_eq!(core.find_next("", 0), None);
     }
 }
