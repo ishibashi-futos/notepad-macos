@@ -69,6 +69,7 @@ impl TextEncoding {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum CoreError {
     System(SystemError),
@@ -82,6 +83,7 @@ pub struct SystemError {
     pub retriable: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum SystemErrorKind {
     Io,
@@ -97,6 +99,7 @@ pub struct DomainError {
     pub context: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 pub enum DomainErrorKind {
     InvalidOperation,
@@ -194,6 +197,7 @@ impl Core {
         self.cursor
     }
 
+    #[allow(dead_code)]
     pub fn has_selection(&self) -> bool {
         self.selection_range().is_some()
     }
@@ -497,6 +501,18 @@ impl CoreError {
                     | std::io::ErrorKind::TimedOut
             ),
         })
+    }
+
+    pub fn describe(&self) -> String {
+        match self {
+            CoreError::System(err) => format!(
+                "system error: {:?} (retriable={}) {}",
+                err.kind, err.retriable, err.context
+            ),
+            CoreError::Domain(err) => {
+                format!("domain error: {:?} {}", err.kind, err.context)
+            }
+        }
     }
 }
 

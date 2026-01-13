@@ -441,5 +441,5 @@ fn log_ime_event(ime: &Ime) {
 }
 
 fn report_error(err: &CoreError) {
-    eprintln!("{:?}", err);
+    eprintln!("{}", err.describe());
 }
