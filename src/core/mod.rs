@@ -169,6 +169,23 @@ impl Core {
         self.rope.len_lines()
     }
 
+    pub fn display_col(&self, line: usize, col: usize) -> usize {
+        if self.rope.len_chars() == 0 {
+            return 0;
+        }
+        let max_line = self.rope.len_lines().saturating_sub(1);
+        let line = line.min(max_line);
+        let mut width = 0;
+        let line_text = self.rope.line(line);
+        for ch in line_text.chars().take(col) {
+            width += match ch {
+                '\t' => 4,
+                _ => 1,
+            };
+        }
+        width
+    }
+
     pub fn set_cursor_line_col(&mut self, line: usize, col: usize, extend: bool) -> bool {
         if self.rope.len_chars() == 0 {
             let before = self.cursor;
@@ -611,5 +628,14 @@ mod tests {
         assert_eq!(core.cursor(), Cursor { line: 1, col: 1 });
         assert!(core.set_cursor_line_col(9, 9, false));
         assert_eq!(core.cursor(), Cursor { line: 1, col: 2 });
+    }
+
+    #[test]
+    fn display_col_counts_tabs() {
+        let mut core = Core::new();
+        core.insert_str("a\tb");
+        assert_eq!(core.display_col(0, 1), 1);
+        assert_eq!(core.display_col(0, 2), 5);
+        assert_eq!(core.display_col(0, 3), 6);
     }
 }

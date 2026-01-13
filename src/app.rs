@@ -666,6 +666,9 @@ fn refresh_ui(ui: &mut Ui, documents: &[Document], active_doc_index: usize) {
     let core = &documents[active_doc_index].core;
     let (line_numbers, digits) = build_line_numbers_text(core.line_count());
     ui.set_line_numbers(&line_numbers, digits);
+    let caret = core.cursor_for_char(core.ime_cursor_char());
+    let caret_col = core.display_col(caret.line, caret.col);
+    ui.set_caret(caret.line, caret_col);
     ui.set_text(&core.display_text());
     refresh_tabs(ui, documents, active_doc_index);
 }
@@ -757,7 +760,8 @@ fn tab_index_from_key(ch: &str) -> Option<usize> {
 
 fn update_ime_cursor_area(window: &winit::window::Window, core: &Core, ui: &Ui) {
     let cursor = core.cursor_for_char(core.ime_cursor_char());
-    let (x, y, w, h) = ui.caret_rect(cursor.line, cursor.col);
+    let display_col = core.display_col(cursor.line, cursor.col);
+    let (x, y, w, h) = ui.caret_rect(cursor.line, display_col);
     window.set_ime_cursor_area(
         PhysicalPosition::new(x, y),
         PhysicalSize::new(w as u32, h as u32),
