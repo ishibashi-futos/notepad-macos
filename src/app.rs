@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use winit::dpi::{PhysicalPosition, PhysicalSize};
-use winit::event::{ElementState, Event, Ime, WindowEvent};
+use winit::event::{ElementState, Event, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::WindowBuilder;
@@ -83,6 +83,7 @@ impl App {
         let mut needs_redraw = true;
         let mut modifiers = winit::keyboard::ModifiersState::default();
         let mut next_request_id: u64 = 1;
+        let mut cursor_position: Option<PhysicalPosition<f64>> = None;
 
         let result = event_loop.run(move |event, elwt| {
             elwt.set_control_flow(ControlFlow::Wait);
@@ -191,6 +192,40 @@ impl App {
                         }
                         WindowEvent::ModifiersChanged(state) => {
                             modifiers = state.state();
+                        }
+                        WindowEvent::CursorMoved { position, .. } => {
+                            cursor_position = Some(position);
+                        }
+                        WindowEvent::MouseInput { state, button, .. } => {
+                            if state == ElementState::Pressed && button == MouseButton::Left {
+                                if let Some(position) = cursor_position {
+                                    let line_count =
+                                        documents[active_doc_index].core.line_count();
+                                    if let Some(line) =
+                                        ui.line_number_hit_test(position, line_count)
+                                    {
+                                        let changed = {
+                                            let doc = &mut documents[active_doc_index];
+                                            doc.core.set_cursor_line_col(line, 0, false)
+                                        };
+                                        if changed {
+                                            refresh_ui(
+                                                &mut ui,
+                                                &documents,
+                                                active_doc_index,
+                                            );
+                                            let doc = &documents[active_doc_index];
+                                            update_title(&window, &doc.core);
+                                            update_ime_cursor_area(
+                                                &window,
+                                                &doc.core,
+                                                &ui,
+                                            );
+                                            needs_redraw = true;
+                                        }
+                                    }
+                                }
+                            }
                         }
                         WindowEvent::Ime(ime) => {
                             log_ime_event(&ime);

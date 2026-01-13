@@ -3,7 +3,7 @@ use glyphon::{
     TextArea, TextAtlas, TextBounds, TextRenderer,
 };
 use wgpu::SurfaceError;
-use winit::dpi::PhysicalSize;
+use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::window::Window;
 
 pub struct Ui {
@@ -226,6 +226,29 @@ impl Ui {
         let x = PADDING_X + self.line_number_width + (col as f32 * char_width);
         let y = PADDING_Y + TAB_BAR_HEIGHT + (line as f32 * LINE_HEIGHT);
         (x as f64, y as f64, char_width as f64, LINE_HEIGHT as f64)
+    }
+
+    pub fn line_number_hit_test(
+        &self,
+        position: PhysicalPosition<f64>,
+        line_count: usize,
+    ) -> Option<usize> {
+        let x = position.x as f32;
+        let y = position.y as f32;
+        let gutter_left = PADDING_X;
+        let gutter_right = PADDING_X + self.line_number_width;
+        if x < gutter_left || x > gutter_right {
+            return None;
+        }
+        let top = PADDING_Y + TAB_BAR_HEIGHT;
+        if y < top || y > self.size.height as f32 {
+            return None;
+        }
+        let line = ((y - top) / LINE_HEIGHT).floor() as usize;
+        if line >= line_count.max(1) {
+            return None;
+        }
+        Some(line)
     }
 
     pub fn render(&mut self) -> Result<(), SurfaceError> {

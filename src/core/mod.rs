@@ -169,6 +169,23 @@ impl Core {
         self.rope.len_lines()
     }
 
+    pub fn set_cursor_line_col(&mut self, line: usize, col: usize, extend: bool) -> bool {
+        if self.rope.len_chars() == 0 {
+            let before = self.cursor;
+            self.set_cursor(0, extend);
+            return self.cursor != before;
+        }
+        let max_line = self.rope.len_lines().saturating_sub(1);
+        let line = line.min(max_line);
+        let line_len = line_len_chars(&self.rope, line);
+        let target_col = col.min(line_len);
+        let next = self.rope.line_to_char(line) + target_col;
+        let before = self.cursor;
+        let before_selection = self.selection_range();
+        self.set_cursor(next, extend);
+        self.cursor != before || self.selection_range() != before_selection
+    }
+
     pub fn display_text(&self) -> String {
         if let Some(preedit) = &self.preedit {
             let mut text = self.rope.to_string();
@@ -584,5 +601,15 @@ mod tests {
         assert_eq!(core.line_count(), 1);
         core.insert_str("a\nb\nc");
         assert_eq!(core.line_count(), 3);
+    }
+
+    #[test]
+    fn set_cursor_line_col_clamps_and_moves() {
+        let mut core = Core::new();
+        core.insert_str("a\nbc");
+        assert!(core.set_cursor_line_col(1, 1, false));
+        assert_eq!(core.cursor(), Cursor { line: 1, col: 1 });
+        assert!(core.set_cursor_line_col(9, 9, false));
+        assert_eq!(core.cursor(), Cursor { line: 1, col: 2 });
     }
 }
