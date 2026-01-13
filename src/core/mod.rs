@@ -183,6 +183,16 @@ impl Core {
     }
 
     pub fn cursor_for_char(&self, char_idx: usize) -> Cursor {
+        let total_chars = self.rope.len_chars();
+        if total_chars == 0 {
+            return Cursor { line: 0, col: 0 };
+        }
+        if char_idx >= total_chars {
+            let line = self.rope.len_lines().saturating_sub(1);
+            let line_start = self.rope.line_to_char(line);
+            let col = total_chars.saturating_sub(line_start);
+            return Cursor { line, col };
+        }
         let line = self.rope.char_to_line(char_idx);
         let line_start = self.rope.line_to_char(line);
         let col = char_idx.saturating_sub(line_start);
@@ -535,4 +545,32 @@ fn char_to_byte_idx(text: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(idx, _)| idx)
         .unwrap_or_else(|| text.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_for_char_clamps_empty_rope() {
+        let core = Core::new();
+        assert_eq!(core.cursor_for_char(0), Cursor { line: 0, col: 0 });
+        assert_eq!(core.cursor_for_char(1), Cursor { line: 0, col: 0 });
+    }
+
+    #[test]
+    fn cursor_for_char_at_end_returns_end_position() {
+        let mut core = Core::new();
+        core.insert_str("a");
+        assert_eq!(core.cursor_for_char(1), Cursor { line: 0, col: 1 });
+    }
+
+    #[test]
+    fn ime_cursor_char_with_preedit_on_empty_does_not_panic() {
+        let mut core = Core::new();
+        core.set_preedit("あ".to_string(), Some((3, 3)));
+        let ime_idx = core.ime_cursor_char();
+        assert_eq!(ime_idx, 1);
+        assert_eq!(core.cursor_for_char(ime_idx), Cursor { line: 0, col: 0 });
+    }
 }
