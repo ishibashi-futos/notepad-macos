@@ -243,6 +243,42 @@ impl Core {
         None
     }
 
+    pub fn find_prev(&self, query: &str, start: usize) -> Option<usize> {
+        if query.is_empty() {
+            return None;
+        }
+        let text = self.rope.to_string();
+        if text.is_empty() {
+            return None;
+        }
+        let matches = find_all_in_text(&text, query);
+        if matches.is_empty() {
+            return None;
+        }
+        let total_chars = text.chars().count();
+        let start = start.min(total_chars);
+        if let Some((_, idx)) = matches
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, idx)| **idx < start)
+        {
+            return Some(*idx);
+        }
+        matches.last().copied()
+    }
+
+    pub fn find_all(&self, query: &str) -> Vec<usize> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let text = self.rope.to_string();
+        if text.is_empty() {
+            return Vec::new();
+        }
+        find_all_in_text(&text, query)
+    }
+
     pub fn ime_cursor_char(&self) -> usize {
         if let Some(preedit) = &self.preedit {
             if let Some((_, end)) = preedit.cursor {
@@ -601,6 +637,29 @@ fn find_in_text(text: &str, query: &str, start_char: usize) -> Option<usize> {
     Some(text[..byte_idx].chars().count())
 }
 
+fn find_all_in_text(text: &str, query: &str) -> Vec<usize> {
+    let query_len = query.chars().count();
+    if query_len == 0 {
+        return Vec::new();
+    }
+    let total_chars = text.chars().count();
+    let mut matches = Vec::new();
+    let mut cursor = 0;
+    while cursor <= total_chars {
+        let Some(idx) = find_in_text(text, query, cursor) else {
+            break;
+        };
+        matches.push(idx);
+        let next = idx + query_len;
+        if next <= cursor {
+            cursor = cursor.saturating_add(1);
+        } else {
+            cursor = next;
+        }
+    }
+    matches
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,5 +719,21 @@ mod tests {
         let mut core = Core::new();
         core.insert_str("abc");
         assert_eq!(core.find_next("", 0), None);
+    }
+
+    #[test]
+    fn find_all_collects_matches() {
+        let mut core = Core::new();
+        core.insert_str("abc def abc abc");
+        assert_eq!(core.find_all("abc"), vec![0, 8, 12]);
+    }
+
+    #[test]
+    fn find_prev_wraps_to_last_match() {
+        let mut core = Core::new();
+        core.insert_str("abc def abc");
+        assert_eq!(core.find_prev("abc", 0), Some(8));
+        assert_eq!(core.find_prev("abc", 8), Some(0));
+        assert_eq!(core.find_prev("abc", 9), Some(8));
     }
 }

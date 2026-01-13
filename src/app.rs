@@ -269,11 +269,13 @@ impl App {
                                         search_preedit = None;
                                     }
                                 }
-                                let search_text = build_search_bar_text(
+                                refresh_search_ui(
+                                    &mut ui,
+                                    &documents[active_doc_index].core,
                                     &search_query,
                                     search_preedit.as_deref(),
+                                    search_active,
                                 );
-                                ui.set_search(&search_text, true);
                                 needs_redraw = true;
                             } else {
                                 {
@@ -327,14 +329,34 @@ impl App {
                                         Key::Named(NamedKey::Enter) => {
                                             if search_preedit.is_none() && !search_query.is_empty() {
                                                 let doc = &mut documents[active_doc_index];
-                                                let start = doc.core.cursor_char().saturating_add(1);
-                                                if let Some(idx) =
-                                                    doc.core.find_next(&search_query, start)
-                                                {
-                                                    let cursor = doc.core.cursor_for_char(idx);
-                                                    changed = doc
-                                                        .core
-                                                        .set_cursor_line_col(cursor.line, cursor.col, false);
+                                                if modifiers.shift_key() {
+                                                    let start = doc.core.cursor_char().saturating_sub(1);
+                                                    if let Some(idx) =
+                                                        doc.core.find_prev(&search_query, start)
+                                                    {
+                                                        let cursor = doc.core.cursor_for_char(idx);
+                                                        changed = doc
+                                                            .core
+                                                            .set_cursor_line_col(
+                                                                cursor.line,
+                                                                cursor.col,
+                                                                false,
+                                                            );
+                                                    }
+                                                } else {
+                                                    let start = doc.core.cursor_char().saturating_add(1);
+                                                    if let Some(idx) =
+                                                        doc.core.find_next(&search_query, start)
+                                                    {
+                                                        let cursor = doc.core.cursor_for_char(idx);
+                                                        changed = doc
+                                                            .core
+                                                            .set_cursor_line_col(
+                                                                cursor.line,
+                                                                cursor.col,
+                                                                false,
+                                                            );
+                                                    }
                                                 }
                                             }
                                             suppress_editor_input = true;
@@ -699,12 +721,13 @@ impl App {
                                 }
 
                                 if search_dirty {
-                                    let search_text = build_search_bar_text(
+                                    refresh_search_ui(
+                                        &mut ui,
+                                        &documents[active_doc_index].core,
                                         &search_query,
                                         search_preedit.as_deref(),
+                                        search_active,
                                     );
-                                    let visible = search_active || !search_query.is_empty();
-                                    ui.set_search(&search_text, visible);
                                     needs_redraw = true;
                                 }
 
@@ -834,9 +857,7 @@ fn refresh_ui(
     let (line_numbers, digits) = build_line_numbers_text(core.line_count());
     ui.set_line_numbers(&line_numbers, digits);
     ui.set_text(&core.display_text());
-    let search_text = build_search_bar_text(search_query, search_preedit);
-    let visible = search_active || !search_query.is_empty();
-    ui.set_search(&search_text, visible);
+    refresh_search_ui(ui, core, search_query, search_preedit, search_active);
     refresh_tabs(ui, documents, active_doc_index);
 }
 
@@ -882,6 +903,61 @@ fn build_search_bar_text(query: &str, preedit: Option<&str>) -> String {
         }
     }
     text
+}
+
+fn build_search_nav_text(core: &Core, query: &str, preedit: Option<&str>) -> String {
+    let effective_query = build_search_effective_query(query, preedit);
+    if effective_query.is_empty() {
+        return String::from("Matches: 0/0  (Enter: next, Shift+Enter: prev)");
+    }
+    let matches = core.find_all(&effective_query);
+    let total = matches.len();
+    let current = current_match_index(&matches, core.cursor_char(), effective_query.chars().count());
+    format!(
+        "Matches: {current}/{total}  (Enter: next, Shift+Enter: prev)"
+    )
+}
+
+fn build_search_effective_query(query: &str, preedit: Option<&str>) -> String {
+    if let Some(preedit) = preedit {
+        let mut text = String::with_capacity(query.len() + preedit.len());
+        text.push_str(query);
+        text.push_str(preedit);
+        text
+    } else {
+        query.to_string()
+    }
+}
+
+fn current_match_index(matches: &[usize], cursor: usize, query_len: usize) -> usize {
+    if matches.is_empty() || query_len == 0 {
+        return 0;
+    }
+    for (index, &pos) in matches.iter().enumerate() {
+        if cursor >= pos && cursor < pos + query_len {
+            return index + 1;
+        }
+    }
+    for (index, &pos) in matches.iter().enumerate() {
+        if pos > cursor {
+            return index + 1;
+        }
+    }
+    1
+}
+
+fn refresh_search_ui(
+    ui: &mut Ui,
+    core: &Core,
+    search_query: &str,
+    search_preedit: Option<&str>,
+    search_active: bool,
+) {
+    let search_text = build_search_bar_text(search_query, search_preedit);
+    let visible = search_active || !search_query.is_empty();
+    ui.set_search(&search_text, visible);
+    let nav_text = build_search_nav_text(core, search_query, search_preedit);
+    ui.set_search_navigation(&nav_text, visible);
 }
 
 fn doc_label(doc: &Document) -> String {
@@ -1020,5 +1096,22 @@ mod tests {
         assert_eq!(build_search_bar_text("abc", None), "Search: abc");
         assert_eq!(build_search_bar_text("", Some("かな")), "Search: かな");
         assert_eq!(build_search_bar_text("ab", Some("c")), "Search: abc");
+    }
+
+    #[test]
+    fn build_search_nav_text_shows_matches() {
+        let mut core = Core::new();
+        core.insert_str("abc def abc");
+        let nav = build_search_nav_text(&core, "abc", None);
+        assert_eq!(
+            nav,
+            "Matches: 1/2  (Enter: next, Shift+Enter: prev)"
+        );
+        core.set_cursor_line_col(0, 9, false);
+        let nav = build_search_nav_text(&core, "abc", None);
+        assert_eq!(
+            nav,
+            "Matches: 2/2  (Enter: next, Shift+Enter: prev)"
+        );
     }
 }

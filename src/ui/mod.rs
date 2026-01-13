@@ -18,11 +18,13 @@ pub struct Ui {
     cache: SwashCache,
     tab_buffer: Buffer,
     search_buffer: Buffer,
+    search_nav_buffer: Buffer,
     line_number_buffer: Buffer,
     buffer: Buffer,
     line_number_width: f32,
     line_number_digits: usize,
     search_visible: bool,
+    search_nav_visible: bool,
 }
 
 const FONT_SIZE: f32 = 18.0;
@@ -36,6 +38,7 @@ const TAB_FONT_SIZE: f32 = 14.0;
 const TAB_LINE_HEIGHT: f32 = 20.0;
 const TAB_BAR_HEIGHT: f32 = 28.0;
 const SEARCH_BAR_HEIGHT: f32 = 24.0;
+const SEARCH_NAV_HEIGHT: f32 = 24.0;
 
 impl Ui {
     pub async fn new(window: &Window) -> Self {
@@ -128,6 +131,20 @@ impl Ui {
             Shaping::Advanced,
         );
 
+        let mut search_nav_buffer =
+            Buffer::new(&mut font_system, Metrics::new(TAB_FONT_SIZE, TAB_LINE_HEIGHT));
+        search_nav_buffer.set_size(
+            &mut font_system,
+            size.width as f32,
+            SEARCH_NAV_HEIGHT,
+        );
+        search_nav_buffer.set_text(
+            &mut font_system,
+            "",
+            Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+        );
+
         let line_number_digits = 1;
         let line_number_width = line_number_width_for_digits(line_number_digits);
         let mut line_number_buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -161,11 +178,13 @@ impl Ui {
             cache,
             tab_buffer,
             search_buffer,
+            search_nav_buffer,
             line_number_buffer,
             buffer,
             line_number_width,
             line_number_digits,
             search_visible: false,
+            search_nav_visible: false,
         };
         ui.update_layout_sizes();
         ui
@@ -242,6 +261,20 @@ impl Ui {
         );
     }
 
+    pub fn set_search_navigation(&mut self, text: &str, visible: bool) {
+        let visibility_changed = self.search_nav_visible != visible;
+        self.search_nav_visible = visible;
+        if visibility_changed {
+            self.update_layout_sizes();
+        }
+        self.search_nav_buffer.set_text(
+            &mut self.font_system,
+            text,
+            Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+        );
+    }
+
     pub fn caret_rect(&self, line: usize, col: usize) -> (f64, f64, f64, f64) {
         let char_width = FONT_SIZE * CHAR_WIDTH_FACTOR;
         let x = PADDING_X + self.line_number_width + (col as f32 * char_width);
@@ -281,6 +314,8 @@ impl Ui {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         let content_top = self.content_top();
+        let content_bottom_y = self.content_bottom_y();
+        let search_nav_top = self.search_nav_top();
 
         self.text_renderer
             .prepare(
@@ -292,7 +327,7 @@ impl Ui {
                     width: self.size.width,
                     height: self.size.height,
                 },
-                if self.search_visible {
+                if self.search_visible || self.search_nav_visible {
                     vec![
                         TextArea {
                             buffer: &self.tab_buffer,
@@ -321,6 +356,19 @@ impl Ui {
                             default_color: Color::rgb(200, 210, 170),
                         },
                         TextArea {
+                            buffer: &self.search_nav_buffer,
+                            left: PADDING_X,
+                            top: search_nav_top,
+                            scale: 1.0,
+                            bounds: TextBounds {
+                                left: 0,
+                                top: search_nav_top as i32,
+                                right: self.size.width as i32,
+                                bottom: (self.size.height as f32 - PADDING_Y) as i32,
+                            },
+                            default_color: Color::rgb(170, 190, 210),
+                        },
+                        TextArea {
                             buffer: &self.line_number_buffer,
                             left: PADDING_X,
                             top: content_top,
@@ -329,7 +377,7 @@ impl Ui {
                                 left: 0,
                                 top: (TAB_BAR_HEIGHT + SEARCH_BAR_HEIGHT) as i32,
                                 right: (PADDING_X + self.line_number_width) as i32,
-                                bottom: self.size.height as i32,
+                                bottom: content_bottom_y as i32,
                             },
                             default_color: Color::rgb(120, 130, 140),
                         },
@@ -342,7 +390,7 @@ impl Ui {
                                 left: (PADDING_X + self.line_number_width) as i32,
                                 top: (TAB_BAR_HEIGHT + SEARCH_BAR_HEIGHT) as i32,
                                 right: self.size.width as i32,
-                                bottom: self.size.height as i32,
+                                bottom: content_bottom_y as i32,
                             },
                             default_color: Color::rgb(230, 230, 230),
                         },
@@ -371,7 +419,7 @@ impl Ui {
                                 left: 0,
                                 top: TAB_BAR_HEIGHT as i32,
                                 right: (PADDING_X + self.line_number_width) as i32,
-                                bottom: self.size.height as i32,
+                                bottom: content_bottom_y as i32,
                             },
                             default_color: Color::rgb(120, 130, 140),
                         },
@@ -384,7 +432,7 @@ impl Ui {
                                 left: (PADDING_X + self.line_number_width) as i32,
                                 top: TAB_BAR_HEIGHT as i32,
                                 right: self.size.width as i32,
-                                bottom: self.size.height as i32,
+                                bottom: content_bottom_y as i32,
                             },
                             default_color: Color::rgb(230, 230, 230),
                         },
@@ -429,8 +477,24 @@ impl Ui {
         PADDING_Y + TAB_BAR_HEIGHT + if self.search_visible { SEARCH_BAR_HEIGHT } else { 0.0 }
     }
 
+    fn content_bottom_inset(&self) -> f32 {
+        if self.search_nav_visible {
+            PADDING_Y + SEARCH_NAV_HEIGHT
+        } else {
+            0.0
+        }
+    }
+
     fn content_height(&self) -> f32 {
-        (self.size.height as f32 - self.content_top()).max(1.0)
+        (self.size.height as f32 - self.content_top() - self.content_bottom_inset()).max(1.0)
+    }
+
+    fn content_bottom_y(&self) -> f32 {
+        self.size.height as f32 - self.content_bottom_inset()
+    }
+
+    fn search_nav_top(&self) -> f32 {
+        self.size.height as f32 - SEARCH_NAV_HEIGHT - PADDING_Y
     }
 
     fn update_layout_sizes(&mut self) {
@@ -444,6 +508,11 @@ impl Ui {
             &mut self.font_system,
             self.size.width as f32,
             SEARCH_BAR_HEIGHT,
+        );
+        self.search_nav_buffer.set_size(
+            &mut self.font_system,
+            self.size.width as f32,
+            SEARCH_NAV_HEIGHT,
         );
         self.line_number_buffer.set_size(
             &mut self.font_system,
