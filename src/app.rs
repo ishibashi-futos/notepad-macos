@@ -628,7 +628,10 @@ fn update_title(window: &winit::window::Window, core: &Core) {
 }
 
 fn refresh_ui(ui: &mut Ui, documents: &[Document], active_doc_index: usize) {
-    ui.set_text(&documents[active_doc_index].core.display_text());
+    let core = &documents[active_doc_index].core;
+    let (line_numbers, digits) = build_line_numbers_text(core.line_count());
+    ui.set_line_numbers(&line_numbers, digits);
+    ui.set_text(&core.display_text());
     refresh_tabs(ui, documents, active_doc_index);
 }
 
@@ -649,6 +652,19 @@ fn build_tab_bar(documents: &[Document], active_doc_index: usize) -> String {
         }
     }
     parts.join("  ")
+}
+
+fn build_line_numbers_text(line_count: usize) -> (String, usize) {
+    let line_count = line_count.max(1);
+    let digits = line_count.to_string().len().max(1);
+    let mut text = String::with_capacity(line_count * (digits + 1));
+    for line in 1..=line_count {
+        if line > 1 {
+            text.push('\n');
+        }
+        text.push_str(&format!("{line:>width$}", width = digits));
+    }
+    (text, digits)
 }
 
 fn doc_label(doc: &Document) -> String {
@@ -769,5 +785,15 @@ mod tests {
         let documents = vec![doc1, doc2];
         let bar = build_tab_bar(&documents, 1);
         assert_eq!(bar, "1:foo.txt  [2:Untitled*]");
+    }
+
+    #[test]
+    fn build_line_numbers_text_pads_to_widest_digit() {
+        let (text, digits) = build_line_numbers_text(12);
+        assert_eq!(digits, 2);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines[0], " 1");
+        assert_eq!(lines[8], " 9");
+        assert_eq!(lines[11], "12");
     }
 }

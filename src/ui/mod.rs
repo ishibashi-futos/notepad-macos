@@ -17,13 +17,18 @@ pub struct Ui {
     text_renderer: TextRenderer,
     cache: SwashCache,
     tab_buffer: Buffer,
+    line_number_buffer: Buffer,
     buffer: Buffer,
+    line_number_width: f32,
+    line_number_digits: usize,
 }
 
 const FONT_SIZE: f32 = 18.0;
 const LINE_HEIGHT: f32 = 24.0;
 const PADDING_X: f32 = 16.0;
 const PADDING_Y: f32 = 16.0;
+const GUTTER_PADDING_LEFT: f32 = 8.0;
+const GUTTER_PADDING_RIGHT: f32 = 12.0;
 const CHAR_WIDTH_FACTOR: f32 = 0.6;
 const TAB_FONT_SIZE: f32 = 14.0;
 const TAB_LINE_HEIGHT: f32 = 20.0;
@@ -107,8 +112,20 @@ impl Ui {
             Shaping::Advanced,
         );
 
+        let line_number_digits = 1;
+        let line_number_width = line_number_width_for_digits(line_number_digits);
+        let mut line_number_buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
+        line_number_buffer.set_size(&mut font_system, line_number_width, size.height as f32);
+        line_number_buffer.set_text(
+            &mut font_system,
+            "",
+            Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+        );
+
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
-        buffer.set_size(&mut font_system, size.width as f32, size.height as f32);
+        let text_width = (size.width as f32 - (PADDING_X + line_number_width)).max(1.0);
+        buffer.set_size(&mut font_system, text_width, size.height as f32);
         buffer.set_text(
             &mut font_system,
             "",
@@ -127,7 +144,10 @@ impl Ui {
             text_renderer,
             cache,
             tab_buffer,
+            line_number_buffer,
             buffer,
+            line_number_width,
+            line_number_digits,
         }
     }
 
@@ -148,12 +168,43 @@ impl Ui {
             new_size.width as f32,
             TAB_BAR_HEIGHT,
         );
+        self.line_number_buffer.set_size(
+            &mut self.font_system,
+            self.line_number_width.max(1.0),
+            new_size.height as f32,
+        );
         self.buffer
-            .set_size(&mut self.font_system, new_size.width as f32, new_size.height as f32);
+            .set_size(
+                &mut self.font_system,
+                (new_size.width as f32 - (PADDING_X + self.line_number_width)).max(1.0),
+                new_size.height as f32,
+            );
     }
 
     pub fn set_text(&mut self, text: &str) {
         self.buffer.set_text(
+            &mut self.font_system,
+            text,
+            Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+        );
+    }
+
+    pub fn set_line_numbers(&mut self, text: &str, digits: usize) {
+        let digits = digits.max(1);
+        if digits != self.line_number_digits {
+            self.line_number_digits = digits;
+            self.line_number_width = line_number_width_for_digits(digits);
+            let text_width = (self.size.width as f32 - (PADDING_X + self.line_number_width)).max(1.0);
+            self.line_number_buffer.set_size(
+                &mut self.font_system,
+                self.line_number_width.max(1.0),
+                self.size.height as f32,
+            );
+            self.buffer
+                .set_size(&mut self.font_system, text_width, self.size.height as f32);
+        }
+        self.line_number_buffer.set_text(
             &mut self.font_system,
             text,
             Attrs::new().family(Family::Monospace),
@@ -172,7 +223,7 @@ impl Ui {
 
     pub fn caret_rect(&self, line: usize, col: usize) -> (f64, f64, f64, f64) {
         let char_width = FONT_SIZE * CHAR_WIDTH_FACTOR;
-        let x = PADDING_X + (col as f32 * char_width);
+        let x = PADDING_X + self.line_number_width + (col as f32 * char_width);
         let y = PADDING_Y + TAB_BAR_HEIGHT + (line as f32 * LINE_HEIGHT);
         (x as f64, y as f64, char_width as f64, LINE_HEIGHT as f64)
     }
@@ -211,12 +262,25 @@ impl Ui {
                         default_color: Color::rgb(180, 190, 200),
                     },
                     TextArea {
-                        buffer: &self.buffer,
+                        buffer: &self.line_number_buffer,
                         left: PADDING_X,
                         top: PADDING_Y + TAB_BAR_HEIGHT,
                         scale: 1.0,
                         bounds: TextBounds {
                             left: 0,
+                            top: TAB_BAR_HEIGHT as i32,
+                            right: (PADDING_X + self.line_number_width) as i32,
+                            bottom: self.size.height as i32,
+                        },
+                        default_color: Color::rgb(120, 130, 140),
+                    },
+                    TextArea {
+                        buffer: &self.buffer,
+                        left: PADDING_X + self.line_number_width,
+                        top: PADDING_Y + TAB_BAR_HEIGHT,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: (PADDING_X + self.line_number_width) as i32,
                             top: TAB_BAR_HEIGHT as i32,
                             right: self.size.width as i32,
                             bottom: self.size.height as i32,
@@ -258,4 +322,9 @@ impl Ui {
         output.present();
         Ok(())
     }
+}
+
+fn line_number_width_for_digits(digits: usize) -> f32 {
+    let char_width = FONT_SIZE * CHAR_WIDTH_FACTOR;
+    (digits as f32 * char_width) + GUTTER_PADDING_LEFT + GUTTER_PADDING_RIGHT
 }

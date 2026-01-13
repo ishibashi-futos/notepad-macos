@@ -165,6 +165,10 @@ impl Core {
         self.rope.to_string()
     }
 
+    pub fn line_count(&self) -> usize {
+        self.rope.len_lines()
+    }
+
     pub fn display_text(&self) -> String {
         if let Some(preedit) = &self.preedit {
             let mut text = self.rope.to_string();
@@ -572,5 +576,13 @@ mod tests {
         let ime_idx = core.ime_cursor_char();
         assert_eq!(ime_idx, 1);
         assert_eq!(core.cursor_for_char(ime_idx), Cursor { line: 0, col: 0 });
+    }
+
+    #[test]
+    fn line_count_reflects_inserted_newlines() {
+        let mut core = Core::new();
+        assert_eq!(core.line_count(), 1);
+        core.insert_str("a\nb\nc");
+        assert_eq!(core.line_count(), 3);
     }
 }
