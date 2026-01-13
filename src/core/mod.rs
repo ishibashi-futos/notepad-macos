@@ -145,6 +145,8 @@ pub struct Core {
 }
 
 impl Core {
+    const PLACEHOLDER_TEXT: &'static str = "Type here...";
+
     pub fn new() -> Self {
         Self {
             rope: Rope::from_str(""),
@@ -169,6 +171,8 @@ impl Core {
             let insert_at = char_to_byte_idx(&text, self.cursor);
             text.insert_str(insert_at, &preedit.text);
             text
+        } else if self.rope.len_chars() == 0 {
+            Self::PLACEHOLDER_TEXT.to_string()
         } else {
             self.rope.to_string()
         }

@@ -41,7 +41,6 @@ impl App {
         window.set_ime_allowed(true);
 
         let mut core = Core::new();
-        core.insert_str("Notepad prototype\nType here...");
 
         let mut ui = pollster::block_on(Ui::new(&window));
         ui.set_text(&core.display_text());
