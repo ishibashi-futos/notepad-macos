@@ -16,6 +16,7 @@ pub struct Ui {
     text_atlas: TextAtlas,
     text_renderer: TextRenderer,
     cache: SwashCache,
+    tab_buffer: Buffer,
     buffer: Buffer,
 }
 
@@ -24,6 +25,9 @@ const LINE_HEIGHT: f32 = 24.0;
 const PADDING_X: f32 = 16.0;
 const PADDING_Y: f32 = 16.0;
 const CHAR_WIDTH_FACTOR: f32 = 0.6;
+const TAB_FONT_SIZE: f32 = 14.0;
+const TAB_LINE_HEIGHT: f32 = 20.0;
+const TAB_BAR_HEIGHT: f32 = 28.0;
 
 impl Ui {
     pub async fn new(window: &Window) -> Self {
@@ -90,6 +94,19 @@ impl Ui {
         let text_renderer =
             TextRenderer::new(&mut text_atlas, &device, wgpu::MultisampleState::default(), None);
 
+        let mut tab_buffer = Buffer::new(&mut font_system, Metrics::new(TAB_FONT_SIZE, TAB_LINE_HEIGHT));
+        tab_buffer.set_size(
+            &mut font_system,
+            size.width as f32,
+            TAB_BAR_HEIGHT,
+        );
+        tab_buffer.set_text(
+            &mut font_system,
+            "",
+            Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+        );
+
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
         buffer.set_size(&mut font_system, size.width as f32, size.height as f32);
         buffer.set_text(
@@ -109,6 +126,7 @@ impl Ui {
             text_atlas,
             text_renderer,
             cache,
+            tab_buffer,
             buffer,
         }
     }
@@ -125,6 +143,11 @@ impl Ui {
         self.config.width = new_size.width;
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
+        self.tab_buffer.set_size(
+            &mut self.font_system,
+            new_size.width as f32,
+            TAB_BAR_HEIGHT,
+        );
         self.buffer
             .set_size(&mut self.font_system, new_size.width as f32, new_size.height as f32);
     }
@@ -138,10 +161,19 @@ impl Ui {
         );
     }
 
+    pub fn set_tabs(&mut self, text: &str) {
+        self.tab_buffer.set_text(
+            &mut self.font_system,
+            text,
+            Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+        );
+    }
+
     pub fn caret_rect(&self, line: usize, col: usize) -> (f64, f64, f64, f64) {
         let char_width = FONT_SIZE * CHAR_WIDTH_FACTOR;
         let x = PADDING_X + (col as f32 * char_width);
-        let y = PADDING_Y + (line as f32 * LINE_HEIGHT);
+        let y = PADDING_Y + TAB_BAR_HEIGHT + (line as f32 * LINE_HEIGHT);
         (x as f64, y as f64, char_width as f64, LINE_HEIGHT as f64)
     }
 
@@ -164,19 +196,34 @@ impl Ui {
                     width: self.size.width,
                     height: self.size.height,
                 },
-                [TextArea {
-                    buffer: &self.buffer,
-                    left: PADDING_X,
-                    top: PADDING_Y,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.size.width as i32,
-                        bottom: self.size.height as i32,
+                [
+                    TextArea {
+                        buffer: &self.tab_buffer,
+                        left: PADDING_X,
+                        top: PADDING_Y,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: 0,
+                            right: self.size.width as i32,
+                            bottom: (PADDING_Y + TAB_BAR_HEIGHT) as i32,
+                        },
+                        default_color: Color::rgb(180, 190, 200),
                     },
-                    default_color: Color::rgb(230, 230, 230),
-                }],
+                    TextArea {
+                        buffer: &self.buffer,
+                        left: PADDING_X,
+                        top: PADDING_Y + TAB_BAR_HEIGHT,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: 0,
+                            top: TAB_BAR_HEIGHT as i32,
+                            right: self.size.width as i32,
+                            bottom: self.size.height as i32,
+                        },
+                        default_color: Color::rgb(230, 230, 230),
+                    },
+                ],
                 &mut self.cache,
             )
             .expect("prepare text");
