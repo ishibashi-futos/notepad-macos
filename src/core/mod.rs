@@ -302,6 +302,31 @@ impl Core {
         })
     }
 
+    pub fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selection_range()?;
+        Some(self.rope.slice(start..end).to_string())
+    }
+
+    pub fn delete_selection(&mut self) -> bool {
+        let (start, end) = match self.selection_range() {
+            Some(range) => range,
+            None => return false,
+        };
+        self.preedit = None;
+        let cursor_before = self.cursor;
+        let deleted = self.remove_range(start, end);
+        self.cursor = start;
+        let edit = Edit {
+            kind: EditKind::Delete { idx: start, text: deleted },
+            cursor_before,
+            cursor_after: self.cursor,
+        };
+        self.selection_anchor = None;
+        self.push_undo(edit);
+        self.dirty = true;
+        true
+    }
+
     pub fn select_all(&mut self) -> bool {
         let before_cursor = self.cursor;
         let before_selection = self.selection_range();
@@ -773,6 +798,38 @@ mod tests {
         assert_eq!(core.selection_range(), Some((0, len)));
         assert_eq!(core.cursor_char(), len);
         assert!(!core.select_all());
+    }
+
+    #[test]
+    fn selected_text_returns_selection_contents() {
+        let mut core = Core::new();
+        core.insert_str("ab\ncd");
+        core.set_cursor_line_col(0, 1, false);
+        core.set_cursor_line_col(1, 1, true);
+        assert_eq!(core.selected_text(), Some("b\nc".to_string()));
+    }
+
+    #[test]
+    fn insert_str_replaces_selection() {
+        let mut core = Core::new();
+        core.insert_str("ab\ncd");
+        core.set_cursor_line_col(0, 1, false);
+        core.set_cursor_line_col(1, 1, true);
+        core.insert_str("X");
+        assert_eq!(core.text(), "aXd");
+        assert_eq!(core.selection_range(), None);
+    }
+
+    #[test]
+    fn delete_selection_removes_selected_text() {
+        let mut core = Core::new();
+        core.insert_str("ab\ncd");
+        core.set_cursor_line_col(0, 1, false);
+        core.set_cursor_line_col(1, 1, true);
+        assert!(core.delete_selection());
+        assert_eq!(core.text(), "ad");
+        assert_eq!(core.cursor_char(), 1);
+        assert_eq!(core.selection_range(), None);
     }
 
     #[test]

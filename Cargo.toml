@@ -12,3 +12,4 @@ ropey = "1"
 encoding_rs = "0.8"
 rfd = "0.14"
 bytemuck = { version = "1", features = ["derive"] }
+arboard = "3"

@@ -609,6 +609,45 @@ impl App {
                                         changed = doc.core.select_all();
                                     }
                                     Key::Character(ref ch)
+                                        if command_key && ch.eq_ignore_ascii_case("c") =>
+                                    {
+                                        if let Some(text) =
+                                            documents[active_doc_index].core.selected_text()
+                                        {
+                                            if let Err(err) = set_clipboard_text(&text) {
+                                                eprintln!("[clipboard] copy failed: {err}");
+                                            }
+                                        }
+                                    }
+                                    Key::Character(ref ch)
+                                        if command_key && ch.eq_ignore_ascii_case("v") =>
+                                    {
+                                        if let Ok(text) = get_clipboard_text() {
+                                            if !text.is_empty() {
+                                                documents[active_doc_index].core.insert_str(&text);
+                                                changed = true;
+                                                text_changed = true;
+                                            }
+                                        }
+                                    }
+                                    Key::Character(ref ch)
+                                        if command_key && ch.eq_ignore_ascii_case("x") =>
+                                    {
+                                        if let Some(text) =
+                                            documents[active_doc_index].core.selected_text()
+                                        {
+                                            if let Err(err) = set_clipboard_text(&text) {
+                                                eprintln!("[clipboard] cut failed: {err}");
+                                            } else if documents[active_doc_index]
+                                                .core
+                                                .delete_selection()
+                                            {
+                                                changed = true;
+                                                text_changed = true;
+                                            }
+                                        }
+                                    }
+                                    Key::Character(ref ch)
                                         if command_key && ch.eq_ignore_ascii_case("w") =>
                                     {
                                         close_current_tab(
@@ -1349,6 +1388,17 @@ fn log_ime_event(ime: &Ime) {
 
 fn report_error(err: &CoreError) {
     eprintln!("{}", err.describe());
+}
+
+fn set_clipboard_text(text: &str) -> Result<(), arboard::Error> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    clipboard.set_text(text.to_string())?;
+    Ok(())
+}
+
+fn get_clipboard_text() -> Result<String, arboard::Error> {
+    let mut clipboard = arboard::Clipboard::new()?;
+    clipboard.get_text()
 }
 
 #[cfg(test)]
