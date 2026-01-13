@@ -268,17 +268,6 @@ impl Core {
         matches.last().copied()
     }
 
-    pub fn find_all(&self, query: &str) -> Vec<usize> {
-        if query.is_empty() {
-            return Vec::new();
-        }
-        let text = self.rope.to_string();
-        if text.is_empty() {
-            return Vec::new();
-        }
-        find_all_in_text(&text, query)
-    }
-
     pub fn ime_cursor_char(&self) -> usize {
         if let Some(preedit) = &self.preedit {
             if let Some((_, end)) = preedit.cursor {
@@ -637,7 +626,7 @@ fn find_in_text(text: &str, query: &str, start_char: usize) -> Option<usize> {
     Some(text[..byte_idx].chars().count())
 }
 
-fn find_all_in_text(text: &str, query: &str) -> Vec<usize> {
+pub(crate) fn find_all_in_text(text: &str, query: &str) -> Vec<usize> {
     let query_len = query.chars().count();
     if query_len == 0 {
         return Vec::new();
@@ -725,7 +714,8 @@ mod tests {
     fn find_all_collects_matches() {
         let mut core = Core::new();
         core.insert_str("abc def abc abc");
-        assert_eq!(core.find_all("abc"), vec![0, 8, 12]);
+        let text = core.text();
+        assert_eq!(find_all_in_text(&text, "abc"), vec![0, 8, 12]);
     }
 
     #[test]

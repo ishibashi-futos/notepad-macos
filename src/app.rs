@@ -26,6 +26,19 @@ enum AppEvent {
         encoding: TextEncoding,
         result: Result<(), CoreError>,
     },
+    SearchResult {
+        doc_id: u64,
+        request_id: u64,
+        query: String,
+        matches: Vec<usize>,
+    },
+}
+
+#[derive(Debug, Default)]
+struct SearchState {
+    query: String,
+    matches: Vec<usize>,
+    pending: bool,
 }
 
 struct Document {
@@ -33,6 +46,8 @@ struct Document {
     core: Core,
     active_open_request: Option<u64>,
     active_save_request: Option<u64>,
+    active_search_request: Option<u64>,
+    search_state: SearchState,
 }
 
 impl Document {
@@ -42,6 +57,8 @@ impl Document {
             core: Core::new(),
             active_open_request: None,
             active_save_request: None,
+            active_search_request: None,
+            search_state: SearchState::default(),
         }
     }
 }
@@ -135,6 +152,19 @@ impl App {
                         Err(err) => report_error(&err),
                     }
                     if refresh_active {
+                        if search_active || !search_query.is_empty() {
+                            let effective_query = build_search_effective_query(
+                                &search_query,
+                                search_preedit.as_deref(),
+                            );
+                            request_search_update(
+                                &mut documents[active_doc_index],
+                                &proxy,
+                                &mut next_request_id,
+                                effective_query,
+                                true,
+                            );
+                        }
                         refresh_ui(
                             &mut ui,
                             &documents,
@@ -188,6 +218,38 @@ impl App {
                     }
                     if refresh_tabs_only {
                         refresh_tabs(&mut ui, &documents, active_doc_index);
+                        needs_redraw = true;
+                    }
+                }
+                Event::UserEvent(AppEvent::SearchResult {
+                    doc_id,
+                    request_id,
+                    query,
+                    matches,
+                }) => {
+                    let active_doc_id = documents
+                        .get(active_doc_index)
+                        .map(|doc| doc.id)
+                        .unwrap_or_default();
+                    let Some(doc) = documents.iter_mut().find(|doc| doc.id == doc_id) else {
+                        return;
+                    };
+                    if doc.active_search_request != Some(request_id) {
+                        return;
+                    }
+                    doc.active_search_request = None;
+                    doc.search_state.query = query;
+                    doc.search_state.matches = matches;
+                    doc.search_state.pending = false;
+                    if active_doc_id == doc_id {
+                        refresh_search_ui(
+                            &mut ui,
+                            &doc.core,
+                            &doc.search_state,
+                            &search_query,
+                            search_preedit.as_deref(),
+                            search_active,
+                        );
                         needs_redraw = true;
                     }
                 }
@@ -250,10 +312,12 @@ impl App {
                         WindowEvent::Ime(ime) => {
                             log_ime_event(&ime);
                             if search_active {
+                                let mut search_dirty = false;
                                 match ime {
                                     Ime::Enabled => {}
                                     Ime::Disabled => {
                                         search_preedit = None;
+                                        search_dirty = true;
                                     }
                                     Ime::Preedit(text, _) => {
                                         if text.is_empty() {
@@ -261,23 +325,40 @@ impl App {
                                         } else {
                                             search_preedit = Some(text);
                                         }
+                                        search_dirty = true;
                                     }
                                     Ime::Commit(text) => {
                                         if !text.is_empty() {
                                             search_query.push_str(&text);
+                                            search_dirty = true;
                                         }
                                         search_preedit = None;
                                     }
                                 }
+                                if search_dirty {
+                                    let effective_query = build_search_effective_query(
+                                        &search_query,
+                                        search_preedit.as_deref(),
+                                    );
+                                    request_search_update(
+                                        &mut documents[active_doc_index],
+                                        &proxy,
+                                        &mut next_request_id,
+                                        effective_query,
+                                        true,
+                                    );
+                                }
                                 refresh_search_ui(
                                     &mut ui,
                                     &documents[active_doc_index].core,
+                                    &documents[active_doc_index].search_state,
                                     &search_query,
                                     search_preedit.as_deref(),
                                     search_active,
                                 );
                                 needs_redraw = true;
                             } else {
+                                let mut text_changed = false;
                                 {
                                     let doc = &mut documents[active_doc_index];
                                     match ime {
@@ -292,8 +373,22 @@ impl App {
                                         }
                                         Ime::Commit(text) => {
                                             doc.core.commit_preedit(&text);
+                                            text_changed = !text.is_empty();
                                         }
                                     }
+                                }
+                                if text_changed && !search_query.is_empty() {
+                                    let effective_query = build_search_effective_query(
+                                        &search_query,
+                                        search_preedit.as_deref(),
+                                    );
+                                    request_search_update(
+                                        &mut documents[active_doc_index],
+                                        &proxy,
+                                        &mut next_request_id,
+                                        effective_query,
+                                        true,
+                                    );
                                 }
                                 refresh_ui(
                                     &mut ui,
@@ -314,6 +409,7 @@ impl App {
                                 let mut changed = false;
                                 let mut search_dirty = false;
                                 let mut suppress_editor_input = search_active;
+                                let mut text_changed = false;
                                 let command_key =
                                     modifiers.super_key() || modifiers.control_key();
                                 let doc_id = documents[active_doc_index].id;
@@ -467,6 +563,19 @@ impl App {
                                             &mut active_doc_index,
                                             last_index,
                                         );
+                                        if search_active || !search_query.is_empty() {
+                                            let effective_query = build_search_effective_query(
+                                                &search_query,
+                                                search_preedit.as_deref(),
+                                            );
+                                            request_search_update(
+                                                &mut documents[active_doc_index],
+                                                &proxy,
+                                                &mut next_request_id,
+                                                effective_query,
+                                                false,
+                                            );
+                                        }
                                         refresh_ui(
                                             &mut ui,
                                             &documents,
@@ -500,6 +609,19 @@ impl App {
                                             &mut documents,
                                             &mut active_doc_index,
                                         );
+                                        if search_active || !search_query.is_empty() {
+                                            let effective_query = build_search_effective_query(
+                                                &search_query,
+                                                search_preedit.as_deref(),
+                                            );
+                                            request_search_update(
+                                                &mut documents[active_doc_index],
+                                                &proxy,
+                                                &mut next_request_id,
+                                                effective_query,
+                                                false,
+                                            );
+                                        }
                                         refresh_ui(
                                             &mut ui,
                                             &documents,
@@ -532,6 +654,19 @@ impl App {
                                             &mut active_doc_index,
                                             next_index,
                                         );
+                                        if search_active || !search_query.is_empty() {
+                                            let effective_query = build_search_effective_query(
+                                                &search_query,
+                                                search_preedit.as_deref(),
+                                            );
+                                            request_search_update(
+                                                &mut documents[active_doc_index],
+                                                &proxy,
+                                                &mut next_request_id,
+                                                effective_query,
+                                                false,
+                                            );
+                                        }
                                         refresh_ui(
                                             &mut ui,
                                             &documents,
@@ -561,6 +696,19 @@ impl App {
                                             &mut active_doc_index,
                                             next_index,
                                         );
+                                        if search_active || !search_query.is_empty() {
+                                            let effective_query = build_search_effective_query(
+                                                &search_query,
+                                                search_preedit.as_deref(),
+                                            );
+                                            request_search_update(
+                                                &mut documents[active_doc_index],
+                                                &proxy,
+                                                &mut next_request_id,
+                                                effective_query,
+                                                false,
+                                            );
+                                        }
                                         refresh_ui(
                                             &mut ui,
                                             &documents,
@@ -590,6 +738,20 @@ impl App {
                                                     &mut active_doc_index,
                                                     index,
                                                 );
+                                                if search_active || !search_query.is_empty() {
+                                                    let effective_query =
+                                                        build_search_effective_query(
+                                                            &search_query,
+                                                            search_preedit.as_deref(),
+                                                        );
+                                                    request_search_update(
+                                                        &mut documents[active_doc_index],
+                                                        &proxy,
+                                                        &mut next_request_id,
+                                                        effective_query,
+                                                        false,
+                                                    );
+                                                }
                                                 refresh_ui(
                                                     &mut ui,
                                                     &documents,
@@ -620,12 +782,14 @@ impl App {
                                         } else {
                                             changed = doc.core.undo();
                                         }
+                                        text_changed = changed;
                                     }
                                     Key::Character(ref ch)
                                         if command_key && ch.eq_ignore_ascii_case("y") =>
                                     {
                                         let doc = &mut documents[active_doc_index];
                                         changed = doc.core.redo();
+                                        text_changed = changed;
                                     }
                                     Key::Character(ref ch)
                                         if command_key && modifiers.shift_key()
@@ -671,6 +835,7 @@ impl App {
                                     Key::Named(NamedKey::Backspace) => {
                                         documents[active_doc_index].core.backspace();
                                         changed = true;
+                                        text_changed = true;
                                     }
                                     Key::Named(NamedKey::ArrowLeft) => {
                                         changed = move_cursor(
@@ -703,6 +868,7 @@ impl App {
                                     Key::Named(NamedKey::Enter) => {
                                         documents[active_doc_index].core.insert_str("\n");
                                         changed = true;
+                                        text_changed = true;
                                     }
                                     _ => {}
                                 }
@@ -716,14 +882,30 @@ impl App {
                                         {
                                             documents[active_doc_index].core.insert_str(text);
                                             changed = true;
+                                            text_changed = true;
                                         }
                                     }
+                                }
+
+                                if search_dirty || text_changed {
+                                    let effective_query = build_search_effective_query(
+                                        &search_query,
+                                        search_preedit.as_deref(),
+                                    );
+                                    request_search_update(
+                                        &mut documents[active_doc_index],
+                                        &proxy,
+                                        &mut next_request_id,
+                                        effective_query,
+                                        true,
+                                    );
                                 }
 
                                 if search_dirty {
                                     refresh_search_ui(
                                         &mut ui,
                                         &documents[active_doc_index].core,
+                                        &documents[active_doc_index].search_state,
                                         &search_query,
                                         search_preedit.as_deref(),
                                         search_active,
@@ -829,6 +1011,51 @@ fn start_save_task(
     });
 }
 
+fn start_search_task(
+    proxy: EventLoopProxy<AppEvent>,
+    doc_id: u64,
+    request_id: u64,
+    query: String,
+    text: String,
+) {
+    std::thread::spawn(move || {
+        let matches = crate::core::find_all_in_text(&text, &query);
+        let _ = proxy.send_event(AppEvent::SearchResult {
+            doc_id,
+            request_id,
+            query,
+            matches,
+        });
+    });
+}
+
+fn request_search_update(
+    doc: &mut Document,
+    proxy: &EventLoopProxy<AppEvent>,
+    next_request_id: &mut u64,
+    effective_query: String,
+    force: bool,
+) {
+    if effective_query.is_empty() {
+        doc.search_state.query.clear();
+        doc.search_state.matches.clear();
+        doc.search_state.pending = false;
+        doc.active_search_request = None;
+        return;
+    }
+    if !force && doc.search_state.query == effective_query && !doc.search_state.pending {
+        return;
+    }
+    let request_id = *next_request_id;
+    *next_request_id += 1;
+    doc.active_search_request = Some(request_id);
+    doc.search_state.query = effective_query.clone();
+    doc.search_state.matches.clear();
+    doc.search_state.pending = true;
+    let text = doc.core.text();
+    start_search_task(proxy.clone(), doc.id, request_id, effective_query, text);
+}
+
 fn update_title(window: &winit::window::Window, core: &Core) {
     let name = core
         .path()
@@ -853,11 +1080,19 @@ fn refresh_ui(
     search_preedit: Option<&str>,
     search_active: bool,
 ) {
-    let core = &documents[active_doc_index].core;
+    let doc = &documents[active_doc_index];
+    let core = &doc.core;
     let (line_numbers, digits) = build_line_numbers_text(core.line_count());
     ui.set_line_numbers(&line_numbers, digits);
     ui.set_text(&core.display_text());
-    refresh_search_ui(ui, core, search_query, search_preedit, search_active);
+    refresh_search_ui(
+        ui,
+        core,
+        &doc.search_state,
+        search_query,
+        search_preedit,
+        search_active,
+    );
     refresh_tabs(ui, documents, active_doc_index);
 }
 
@@ -905,17 +1140,27 @@ fn build_search_bar_text(query: &str, preedit: Option<&str>) -> String {
     text
 }
 
-fn build_search_nav_text(core: &Core, query: &str, preedit: Option<&str>) -> String {
+fn build_search_nav_text(
+    core: &Core,
+    search_state: &SearchState,
+    query: &str,
+    preedit: Option<&str>,
+) -> String {
     let effective_query = build_search_effective_query(query, preedit);
+    let nav_hint = " (Enter: next, Shift+Enter: prev)";
     if effective_query.is_empty() {
-        return String::from("Matches: 0/0  (Enter: next, Shift+Enter: prev)");
+        return format!("Matches: 0/0{nav_hint}");
     }
-    let matches = core.find_all(&effective_query);
-    let total = matches.len();
-    let current = current_match_index(&matches, core.cursor_char(), effective_query.chars().count());
-    format!(
-        "Matches: {current}/{total}  (Enter: next, Shift+Enter: prev)"
-    )
+    if search_state.pending || search_state.query != effective_query {
+        return format!("Matches: --/--  Searching...{nav_hint}");
+    }
+    let total = search_state.matches.len();
+    let current = current_match_index(
+        &search_state.matches,
+        core.cursor_char(),
+        effective_query.chars().count(),
+    );
+    format!("Matches: {current}/{total}{nav_hint}")
 }
 
 fn build_search_effective_query(query: &str, preedit: Option<&str>) -> String {
@@ -949,6 +1194,7 @@ fn current_match_index(matches: &[usize], cursor: usize, query_len: usize) -> us
 fn refresh_search_ui(
     ui: &mut Ui,
     core: &Core,
+    search_state: &SearchState,
     search_query: &str,
     search_preedit: Option<&str>,
     search_active: bool,
@@ -956,7 +1202,7 @@ fn refresh_search_ui(
     let search_text = build_search_bar_text(search_query, search_preedit);
     let visible = search_active || !search_query.is_empty();
     ui.set_search(&search_text, visible);
-    let nav_text = build_search_nav_text(core, search_query, search_preedit);
+    let nav_text = build_search_nav_text(core, search_state, search_query, search_preedit);
     ui.set_search_navigation(&nav_text, visible);
 }
 
@@ -981,6 +1227,8 @@ fn switch_to_tab(documents: &mut [Document], active_doc_index: &mut usize, next_
     let prev = &mut documents[*active_doc_index];
     prev.active_open_request = None;
     prev.active_save_request = None;
+    prev.active_search_request = None;
+    prev.search_state.pending = false;
     prev.core.clear_preedit();
     *active_doc_index = next_index.min(documents.len() - 1);
 }
@@ -993,6 +1241,8 @@ fn close_current_tab(documents: &mut Vec<Document>, active_doc_index: &mut usize
         documents[0].core = Core::new();
         documents[0].active_open_request = None;
         documents[0].active_save_request = None;
+        documents[0].active_search_request = None;
+        documents[0].search_state = SearchState::default();
         return;
     }
     documents.remove(*active_doc_index);
@@ -1102,16 +1352,37 @@ mod tests {
     fn build_search_nav_text_shows_matches() {
         let mut core = Core::new();
         core.insert_str("abc def abc");
-        let nav = build_search_nav_text(&core, "abc", None);
+        let search_state = SearchState {
+            query: "abc".to_string(),
+            matches: vec![0, 8],
+            pending: false,
+        };
+        let nav = build_search_nav_text(&core, &search_state, "abc", None);
         assert_eq!(
             nav,
-            "Matches: 1/2  (Enter: next, Shift+Enter: prev)"
+            "Matches: 1/2 (Enter: next, Shift+Enter: prev)"
         );
         core.set_cursor_line_col(0, 9, false);
-        let nav = build_search_nav_text(&core, "abc", None);
+        let nav = build_search_nav_text(&core, &search_state, "abc", None);
         assert_eq!(
             nav,
-            "Matches: 2/2  (Enter: next, Shift+Enter: prev)"
+            "Matches: 2/2 (Enter: next, Shift+Enter: prev)"
+        );
+    }
+
+    #[test]
+    fn build_search_nav_text_shows_searching_when_pending() {
+        let mut core = Core::new();
+        core.insert_str("abc def abc");
+        let search_state = SearchState {
+            query: "abc".to_string(),
+            matches: vec![],
+            pending: true,
+        };
+        let nav = build_search_nav_text(&core, &search_state, "abc", None);
+        assert_eq!(
+            nav,
+            "Matches: --/--  Searching... (Enter: next, Shift+Enter: prev)"
         );
     }
 }
