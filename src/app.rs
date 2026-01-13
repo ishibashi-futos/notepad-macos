@@ -4,7 +4,7 @@ use std::time::Duration;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Event, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
-use winit::keyboard::{Key, NamedKey};
+use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::WindowBuilder;
 
 use crate::core::{Core, CoreError, TextEncoding};
@@ -39,6 +39,121 @@ struct SearchState {
     query: String,
     matches: Vec<usize>,
     pending: bool,
+}
+
+#[derive(Debug)]
+struct ClipboardHistory {
+    items: Vec<String>,
+    max: usize,
+    selected_index: usize,
+    visible: bool,
+    window_start: usize,
+}
+
+impl ClipboardHistory {
+    fn new(max: usize) -> Self {
+        Self {
+            items: Vec::new(),
+            max,
+            selected_index: 0,
+            visible: false,
+            window_start: 0,
+        }
+    }
+
+    fn is_visible(&self) -> bool {
+        self.visible
+    }
+
+    fn visible_count(&self) -> usize {
+        self.items.len().min(3)
+    }
+
+    fn push(&mut self, text: &str) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        if self.items.first().is_some_and(|item| item == text) {
+            return false;
+        }
+        self.items.insert(0, text.to_string());
+        if self.items.len() > self.max {
+            self.items.truncate(self.max);
+        }
+        self.selected_index = 0;
+        self.window_start = 0;
+        if self.selected_index >= self.items.len() {
+            self.selected_index = self.items.len().saturating_sub(1);
+        }
+        true
+    }
+
+    fn show(&mut self) -> bool {
+        if self.items.is_empty() {
+            self.visible = false;
+            return false;
+        }
+        self.visible = true;
+        self.selected_index = 0;
+        self.window_start = 0;
+        true
+    }
+
+    fn hide(&mut self) -> bool {
+        let changed = self.visible;
+        self.visible = false;
+        changed
+    }
+
+    fn move_up(&mut self) {
+        self.selected_index = self.selected_index.saturating_sub(1);
+        self.adjust_window();
+    }
+
+    fn move_down(&mut self) {
+        if self.items.is_empty() {
+            return;
+        }
+        let last = self.items.len() - 1;
+        self.selected_index = (self.selected_index + 1).min(last);
+        self.adjust_window();
+    }
+
+    fn select_visible_index(&mut self, index: usize) -> bool {
+        let offset = self.window_start + index;
+        if index < self.visible_count() && offset < self.items.len() {
+            self.selected_index = offset;
+            self.adjust_window();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn selected_text(&self) -> Option<&str> {
+        self.items.get(self.selected_index).map(|item| item.as_str())
+    }
+
+    fn window_range(&self) -> std::ops::Range<usize> {
+        let start = self.window_start.min(self.items.len());
+        let end = (start + self.visible_count()).min(self.items.len());
+        start..end
+    }
+
+    fn adjust_window(&mut self) {
+        let window_size = self.visible_count().max(1);
+        if self.selected_index < self.window_start {
+            self.window_start = self.selected_index;
+        } else if self.selected_index >= self.window_start + window_size {
+            self.window_start = self
+                .selected_index
+                .saturating_sub(window_size.saturating_sub(1));
+        }
+        let max_start = self.items.len().saturating_sub(window_size);
+        if self.window_start > max_start {
+            self.window_start = max_start;
+        }
+    }
 }
 
 struct Document {
@@ -85,6 +200,8 @@ impl App {
         let mut search_query = String::new();
         let mut search_active = false;
         let mut search_preedit: Option<String> = None;
+        let mut clipboard_history = ClipboardHistory::new(100);
+        let mut fn_pressed = false;
         refresh_ui(
             &mut ui,
             &documents,
@@ -92,6 +209,7 @@ impl App {
             &search_query,
             search_preedit.as_deref(),
             search_active,
+            &clipboard_history,
         );
         update_title(&window, &documents[active_doc_index].core);
         update_ime_cursor_area(&window, &documents[active_doc_index].core, &ui);
@@ -172,6 +290,7 @@ impl App {
                             &search_query,
                             search_preedit.as_deref(),
                             search_active,
+                            &clipboard_history,
                         );
                         let doc = &documents[active_doc_index];
                         update_title(&window, &doc.core);
@@ -249,6 +368,7 @@ impl App {
                             &search_query,
                             search_preedit.as_deref(),
                             search_active,
+                            &clipboard_history,
                         );
                         needs_redraw = true;
                     }
@@ -295,6 +415,7 @@ impl App {
                                                 &search_query,
                                                 search_preedit.as_deref(),
                                                 search_active,
+                                                &clipboard_history,
                                             );
                                             let doc = &documents[active_doc_index];
                                             update_title(&window, &doc.core);
@@ -310,6 +431,9 @@ impl App {
                             }
                         }
                         WindowEvent::Ime(ime) => {
+                            if clipboard_history.is_visible() {
+                                return;
+                            }
                             log_ime_event(&ime);
                             if search_active {
                                 let mut search_dirty = false;
@@ -355,6 +479,7 @@ impl App {
                                     &search_query,
                                     search_preedit.as_deref(),
                                     search_active,
+                                    &clipboard_history,
                                 );
                                 needs_redraw = true;
                             } else {
@@ -397,6 +522,7 @@ impl App {
                                     &search_query,
                                     search_preedit.as_deref(),
                                     search_active,
+                                    &clipboard_history,
                                 );
                                 let doc = &documents[active_doc_index];
                                 update_title(&window, &doc.core);
@@ -405,15 +531,68 @@ impl App {
                             }
                         }
                         WindowEvent::KeyboardInput { event, .. } => {
+                            if matches!(event.logical_key, Key::Named(NamedKey::Fn)) {
+                                fn_pressed = event.state == ElementState::Pressed;
+                                return;
+                            }
                             if event.state == ElementState::Pressed {
                                 let mut changed = false;
                                 let mut search_dirty = false;
-                                let mut suppress_editor_input = search_active;
+                                let mut history_dirty = false;
+                                let mut suppress_editor_input =
+                                    search_active || clipboard_history.is_visible();
                                 let mut text_changed = false;
+                                let mut history_commit: Option<String> = None;
                                 let command_key =
                                     modifiers.super_key() || modifiers.control_key();
+                                let ctrl_v = is_ctrl_v(event.physical_key, modifiers);
                                 let doc_id = documents[active_doc_index].id;
-                                if search_active {
+                                if clipboard_history.is_visible() {
+                                    match event.logical_key {
+                                        Key::Named(NamedKey::Escape) => {
+                                            if clipboard_history.hide() {
+                                                history_dirty = true;
+                                            }
+                                            suppress_editor_input = true;
+                                        }
+                                        Key::Named(NamedKey::Enter) => {
+                                            history_commit = clipboard_history
+                                                .selected_text()
+                                                .map(|text| text.to_string());
+                                            if clipboard_history.hide() {
+                                                history_dirty = true;
+                                            }
+                                            suppress_editor_input = true;
+                                        }
+                                        Key::Named(NamedKey::ArrowUp) => {
+                                            clipboard_history.move_up();
+                                            history_dirty = true;
+                                            suppress_editor_input = true;
+                                        }
+                                        Key::Named(NamedKey::ArrowDown) => {
+                                            clipboard_history.move_down();
+                                            history_dirty = true;
+                                            suppress_editor_input = true;
+                                        }
+                                        Key::Character(ref ch)
+                                            if matches!(ch.as_str(), "1" | "2" | "3") =>
+                                        {
+                                            let index = ch.parse::<usize>().unwrap_or(1) - 1;
+                                            if clipboard_history.select_visible_index(index) {
+                                                history_commit = clipboard_history
+                                                    .selected_text()
+                                                    .map(|text| text.to_string());
+                                                if clipboard_history.hide() {
+                                                    history_dirty = true;
+                                                }
+                                            }
+                                            suppress_editor_input = true;
+                                        }
+                                        _ => {
+                                            suppress_editor_input = true;
+                                        }
+                                    }
+                                } else if search_active {
                                     match event.logical_key {
                                         Key::Named(NamedKey::Escape) => {
                                             search_active = false;
@@ -480,6 +659,12 @@ impl App {
                                         }
                                     }
                                 } else {
+                                    if ctrl_v {
+                                        if clipboard_history.show() {
+                                            history_dirty = true;
+                                            suppress_editor_input = true;
+                                        }
+                                    } else {
                                     match event.logical_key {
                                     Key::Character(ref ch)
                                         if command_key && ch.eq_ignore_ascii_case("o") =>
@@ -583,6 +768,7 @@ impl App {
                                             &search_query,
                                             search_preedit.as_deref(),
                                             search_active,
+                                            &clipboard_history,
                                         );
                                         update_title(
                                             &window,
@@ -609,18 +795,36 @@ impl App {
                                         changed = doc.core.select_all();
                                     }
                                     Key::Character(ref ch)
+                                        if command_key
+                                            && fn_pressed
+                                            && ch.eq_ignore_ascii_case("c") =>
+                                    {
+                                        if let Some(text) =
+                                            documents[active_doc_index].core.selected_text()
+                                        {
+                                            if clipboard_history.push(&text) {
+                                                history_dirty = true;
+                                            }
+                                        }
+                                    }
+                                    Key::Character(ref ch)
                                         if command_key && ch.eq_ignore_ascii_case("c") =>
                                     {
                                         if let Some(text) =
                                             documents[active_doc_index].core.selected_text()
                                         {
+                                            if clipboard_history.push(&text) {
+                                                history_dirty = true;
+                                            }
                                             if let Err(err) = set_clipboard_text(&text) {
                                                 eprintln!("[clipboard] copy failed: {err}");
                                             }
                                         }
                                     }
                                     Key::Character(ref ch)
-                                        if command_key && ch.eq_ignore_ascii_case("v") =>
+                                        if command_key
+                                            && !modifiers.control_key()
+                                            && ch.eq_ignore_ascii_case("v") =>
                                     {
                                         if let Ok(text) = get_clipboard_text() {
                                             if !text.is_empty() {
@@ -674,6 +878,7 @@ impl App {
                                             &search_query,
                                             search_preedit.as_deref(),
                                             search_active,
+                                            &clipboard_history,
                                         );
                                         update_title(
                                             &window,
@@ -719,6 +924,7 @@ impl App {
                                             &search_query,
                                             search_preedit.as_deref(),
                                             search_active,
+                                            &clipboard_history,
                                         );
                                         update_title(
                                             &window,
@@ -761,6 +967,7 @@ impl App {
                                             &search_query,
                                             search_preedit.as_deref(),
                                             search_active,
+                                            &clipboard_history,
                                         );
                                         update_title(
                                             &window,
@@ -804,6 +1011,7 @@ impl App {
                                                     &search_query,
                                                     search_preedit.as_deref(),
                                                     search_active,
+                                                    &clipboard_history,
                                                 );
                                                 update_title(
                                                     &window,
@@ -917,6 +1125,13 @@ impl App {
                                     }
                                     _ => {}
                                 }
+                                    }
+                                }
+
+                                if let Some(text) = history_commit {
+                                    documents[active_doc_index].core.insert_str(&text);
+                                    changed = true;
+                                    text_changed = true;
                                 }
 
                                 if !search_active && !changed && !suppress_editor_input {
@@ -954,6 +1169,20 @@ impl App {
                                         &search_query,
                                         search_preedit.as_deref(),
                                         search_active,
+                                        &clipboard_history,
+                                    );
+                                    needs_redraw = true;
+                                }
+
+                                if history_dirty {
+                                    refresh_search_ui(
+                                        &mut ui,
+                                        &documents[active_doc_index].core,
+                                        &documents[active_doc_index].search_state,
+                                        &search_query,
+                                        search_preedit.as_deref(),
+                                        search_active,
+                                        &clipboard_history,
                                     );
                                     needs_redraw = true;
                                 }
@@ -966,6 +1195,7 @@ impl App {
                                         &search_query,
                                         search_preedit.as_deref(),
                                         search_active,
+                                        &clipboard_history,
                                     );
                                     let doc = &documents[active_doc_index];
                                     update_title(&window, &doc.core);
@@ -1124,6 +1354,7 @@ fn refresh_ui(
     search_query: &str,
     search_preedit: Option<&str>,
     search_active: bool,
+    clipboard_history: &ClipboardHistory,
 ) {
     let doc = &documents[active_doc_index];
     let core = &doc.core;
@@ -1137,6 +1368,7 @@ fn refresh_ui(
         search_query,
         search_preedit,
         search_active,
+        clipboard_history,
     );
     refresh_tabs(ui, documents, active_doc_index);
 }
@@ -1243,14 +1475,56 @@ fn refresh_search_ui(
     search_query: &str,
     search_preedit: Option<&str>,
     search_active: bool,
+    clipboard_history: &ClipboardHistory,
 ) {
     let search_text = build_search_bar_text(search_query, search_preedit);
-    let visible = search_active || !search_query.is_empty();
-    ui.set_search(&search_text, visible);
-    let nav_text = build_search_nav_text(core, search_state, search_query, search_preedit);
-    ui.set_search_navigation(&nav_text, visible);
+    let search_visible = search_active || !search_query.is_empty();
+    ui.set_search(&search_text, search_visible);
+    if clipboard_history.is_visible() {
+        if let Some(nav_text) = build_clipboard_nav_text(clipboard_history) {
+            ui.set_search_navigation(&nav_text, true);
+        } else {
+            ui.set_search_navigation("", false);
+        }
+    } else {
+        let nav_text = build_search_nav_text(core, search_state, search_query, search_preedit);
+        ui.set_search_navigation(&nav_text, search_visible);
+    }
     let selection_rects = build_selection_rects(ui, core);
     ui.set_selection_rects(&selection_rects);
+}
+
+fn build_clipboard_nav_text(history: &ClipboardHistory) -> Option<String> {
+    if !history.is_visible() || history.items.is_empty() {
+        return None;
+    }
+    let mut lines = Vec::with_capacity(history.visible_count() + 1);
+    lines.push("Clipboard:".to_string());
+    let range = history.window_range();
+    for (offset, item) in history.items[range.clone()].iter().enumerate() {
+        let absolute_index = range.start + offset;
+        let prefix = if absolute_index == history.selected_index {
+            "> "
+        } else {
+            "  "
+        };
+        let display = format_clipboard_item(item, 40);
+        lines.push(format!("{prefix}[{}] {}", offset + 1, display));
+    }
+    Some(lines.join("\n"))
+}
+
+fn format_clipboard_item(item: &str, limit: usize) -> String {
+    let normalized = item.replace('\n', "\\n");
+    let mut chars = normalized.chars();
+    let mut out = String::with_capacity(limit.min(normalized.len()));
+    for _ in 0..limit {
+        let Some(ch) = chars.next() else {
+            break;
+        };
+        out.push(ch);
+    }
+    out
 }
 
 fn build_selection_spans(core: &Core) -> Vec<(usize, usize, usize)> {
@@ -1344,6 +1618,10 @@ fn tab_index_from_key(ch: &str) -> Option<usize> {
         return None;
     }
     digit.to_digit(10).map(|value| value as usize - 1)
+}
+
+fn is_ctrl_v(physical_key: PhysicalKey, modifiers: ModifiersState) -> bool {
+    modifiers.control_key() && matches!(physical_key, PhysicalKey::Code(KeyCode::KeyV))
 }
 
 fn update_ime_cursor_area(window: &winit::window::Window, core: &Core, ui: &Ui) {
@@ -1488,5 +1766,92 @@ mod tests {
         core.set_cursor_line_col(1, 1, true);
         let spans = build_selection_spans(&core);
         assert_eq!(spans, vec![(0, 1, 2), (1, 0, 1)]);
+    }
+
+    #[test]
+    fn clipboard_history_pushes_and_trims() {
+        let mut history = ClipboardHistory::new(3);
+        assert!(!history.show());
+        assert!(!history.push(""));
+        assert!(history.push("a"));
+        assert!(!history.push("a"));
+        assert!(history.push("b"));
+        assert!(history.push("c"));
+        assert!(history.push("d"));
+        assert_eq!(history.items, vec!["d", "c", "b"]);
+        assert_eq!(history.selected_index, 0);
+    }
+
+    #[test]
+    fn clipboard_history_nav_text_formats_items() {
+        let mut history = ClipboardHistory::new(100);
+        history.push("hello world");
+        history.push("こんにちは\n世界");
+        let long = "x".repeat(50);
+        history.push(&long);
+        assert!(history.show());
+        history.move_down();
+        let nav = build_clipboard_nav_text(&history).expect("nav text");
+        let expected = format!(
+            "Clipboard:\n  [1] {}\n> [2] こんにちは\\n世界\n  [3] hello world",
+            "x".repeat(40)
+        );
+        assert_eq!(nav, expected);
+    }
+
+    #[test]
+    fn clipboard_history_moves_selection_within_bounds() {
+        let mut history = ClipboardHistory::new(10);
+        history.push("first");
+        history.push("second");
+        history.show();
+        history.move_down();
+        history.move_down();
+        assert_eq!(history.selected_index, 1);
+        assert_eq!(history.window_start, 0);
+        history.move_up();
+        assert_eq!(history.selected_index, 0);
+        assert!(!history.select_visible_index(5));
+        assert!(history.select_visible_index(1));
+    }
+
+    #[test]
+    fn is_ctrl_v_detects_control_v() {
+        assert!(is_ctrl_v(
+            PhysicalKey::Code(KeyCode::KeyV),
+            ModifiersState::CONTROL
+        ));
+        assert!(!is_ctrl_v(
+            PhysicalKey::Code(KeyCode::KeyV),
+            ModifiersState::SUPER
+        ));
+        assert!(!is_ctrl_v(
+            PhysicalKey::Code(KeyCode::KeyC),
+            ModifiersState::CONTROL
+        ));
+    }
+
+    #[test]
+    fn clipboard_history_scrolls_window() {
+        let mut history = ClipboardHistory::new(10);
+        history.push("one");
+        history.push("two");
+        history.push("three");
+        history.push("four");
+        history.push("five");
+        history.show();
+        assert_eq!(history.window_start, 0);
+        history.move_down();
+        history.move_down();
+        assert_eq!(history.selected_index, 2);
+        assert_eq!(history.window_start, 0);
+        history.move_down();
+        assert_eq!(history.selected_index, 3);
+        assert_eq!(history.window_start, 1);
+        history.move_down();
+        assert_eq!(history.selected_index, 4);
+        assert_eq!(history.window_start, 2);
+        let nav = build_clipboard_nav_text(&history).expect("nav");
+        assert!(nav.contains("> [3] one"));
     }
 }

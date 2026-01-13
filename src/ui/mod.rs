@@ -45,7 +45,7 @@ const TAB_FONT_SIZE: f32 = 14.0;
 const TAB_LINE_HEIGHT: f32 = 20.0;
 const TAB_BAR_HEIGHT: f32 = 28.0;
 const SEARCH_BAR_HEIGHT: f32 = 24.0;
-const SEARCH_NAV_HEIGHT: f32 = 24.0;
+const SEARCH_NAV_HEIGHT: f32 = LINE_HEIGHT * 4.0;
 const SELECTION_COLOR: [f32; 4] = [0.2, 0.45, 0.9, 0.35];
 const SELECTION_SHADER: &str = r#"
 struct VertexInput {
