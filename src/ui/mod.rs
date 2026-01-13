@@ -2,6 +2,8 @@ use glyphon::{
     Attrs, Buffer, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
     TextArea, TextAtlas, TextBounds, TextRenderer,
 };
+use bytemuck::{Pod, Zeroable};
+use wgpu::util::DeviceExt;
 use wgpu::SurfaceError;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::window::Window;
@@ -25,6 +27,11 @@ pub struct Ui {
     line_number_digits: usize,
     search_visible: bool,
     search_nav_visible: bool,
+    selection_rects: Vec<(f32, f32, f32, f32)>,
+    selection_vertices: Vec<SelectionVertex>,
+    selection_buffer: wgpu::Buffer,
+    selection_vertex_count: u32,
+    selection_pipeline: wgpu::RenderPipeline,
 }
 
 const FONT_SIZE: f32 = 18.0;
@@ -39,6 +46,38 @@ const TAB_LINE_HEIGHT: f32 = 20.0;
 const TAB_BAR_HEIGHT: f32 = 28.0;
 const SEARCH_BAR_HEIGHT: f32 = 24.0;
 const SEARCH_NAV_HEIGHT: f32 = 24.0;
+const SELECTION_COLOR: [f32; 4] = [0.2, 0.45, 0.9, 0.35];
+const SELECTION_SHADER: &str = r#"
+struct VertexInput {
+    @location(0) position: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs_main(input: VertexInput) -> VertexOutput {
+    var out: VertexOutput;
+    out.position = vec4<f32>(input.position, 0.0, 1.0);
+    out.color = input.color;
+    return out;
+}
+
+@fragment
+fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    return input.color;
+}
+"#;
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct SelectionVertex {
+    position: [f32; 2],
+    color: [f32; 4],
+}
 
 impl Ui {
     pub async fn new(window: &Window) -> Self {
@@ -104,6 +143,59 @@ impl Ui {
         let mut text_atlas = TextAtlas::new(&device, &queue, config.format);
         let text_renderer =
             TextRenderer::new(&mut text_atlas, &device, wgpu::MultisampleState::default(), None);
+        let selection_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("selection shader"),
+            source: wgpu::ShaderSource::Wgsl(SELECTION_SHADER.into()),
+        });
+        let selection_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("selection pipeline layout"),
+                bind_group_layouts: &[],
+                push_constant_ranges: &[],
+            });
+        let selection_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("selection pipeline"),
+            layout: Some(&selection_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &selection_shader,
+                entry_point: "vs_main",
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<SelectionVertex>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 0,
+                            format: wgpu::VertexFormat::Float32x2,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: 8,
+                            shader_location: 1,
+                            format: wgpu::VertexFormat::Float32x4,
+                        },
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &selection_shader,
+                entry_point: "fs_main",
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+        });
+        let selection_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("selection buffer"),
+            size: 1,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let mut tab_buffer = Buffer::new(&mut font_system, Metrics::new(TAB_FONT_SIZE, TAB_LINE_HEIGHT));
         tab_buffer.set_size(
@@ -185,6 +277,11 @@ impl Ui {
             line_number_digits,
             search_visible: false,
             search_nav_visible: false,
+            selection_rects: Vec::new(),
+            selection_vertices: Vec::new(),
+            selection_buffer,
+            selection_vertex_count: 0,
+            selection_pipeline,
         };
         ui.update_layout_sizes();
         ui
@@ -203,6 +300,7 @@ impl Ui {
         self.config.height = new_size.height;
         self.surface.configure(&self.device, &self.config);
         self.update_layout_sizes();
+        self.update_selection_vertices();
     }
 
     pub fn set_text(&mut self, text: &str) {
@@ -275,11 +373,30 @@ impl Ui {
         );
     }
 
+    pub fn set_selection_rects(&mut self, rects: &[(f32, f32, f32, f32)]) {
+        self.selection_rects.clear();
+        self.selection_rects.extend_from_slice(rects);
+        self.update_selection_vertices();
+    }
+
     pub fn caret_rect(&self, line: usize, col: usize) -> (f64, f64, f64, f64) {
         let char_width = FONT_SIZE * CHAR_WIDTH_FACTOR;
         let x = PADDING_X + self.line_number_width + (col as f32 * char_width);
         let y = self.content_top() + (line as f32 * LINE_HEIGHT);
         (x as f64, y as f64, char_width as f64, LINE_HEIGHT as f64)
+    }
+
+    pub fn selection_rect(
+        &self,
+        line: usize,
+        start_col: usize,
+        end_col: usize,
+    ) -> (f32, f32, f32, f32) {
+        let char_width = FONT_SIZE * CHAR_WIDTH_FACTOR;
+        let x = PADDING_X + self.line_number_width + (start_col as f32 * char_width);
+        let y = self.content_top() + (line as f32 * LINE_HEIGHT);
+        let width = (end_col.saturating_sub(start_col) as f32) * char_width;
+        (x, y, width, LINE_HEIGHT)
     }
 
     pub fn line_number_hit_test(
@@ -463,6 +580,12 @@ impl Ui {
                 occlusion_query_set: None,
             });
 
+            if self.selection_vertex_count > 0 {
+                render_pass.set_pipeline(&self.selection_pipeline);
+                render_pass.set_vertex_buffer(0, self.selection_buffer.slice(..));
+                render_pass.draw(0..self.selection_vertex_count, 0..1);
+            }
+
             self.text_renderer
                 .render(&self.text_atlas, &mut render_pass)
                 .expect("render text");
@@ -495,6 +618,77 @@ impl Ui {
 
     fn search_nav_top(&self) -> f32 {
         self.size.height as f32 - SEARCH_NAV_HEIGHT - PADDING_Y
+    }
+
+    fn update_selection_vertices(&mut self) {
+        self.selection_vertices.clear();
+        if self.selection_rects.is_empty() {
+            self.selection_vertex_count = 0;
+            return;
+        }
+        let width = self.size.width as f32;
+        let height = self.size.height as f32;
+        if width <= 0.0 || height <= 0.0 {
+            self.selection_vertex_count = 0;
+            return;
+        }
+        for &(x, y, w, h) in &self.selection_rects {
+            self.selection_vertices
+                .extend_from_slice(&self.rect_to_vertices(x, y, w, h, width, height));
+        }
+        self.selection_vertex_count = self.selection_vertices.len() as u32;
+        if self.selection_vertex_count == 0 {
+            return;
+        }
+        self.selection_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("selection buffer"),
+                contents: bytemuck::cast_slice(&self.selection_vertices),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            });
+    }
+
+    fn rect_to_vertices(
+        &self,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        width: f32,
+        height: f32,
+    ) -> [SelectionVertex; 6] {
+        let left = (x / width) * 2.0 - 1.0;
+        let right = ((x + w) / width) * 2.0 - 1.0;
+        let top = 1.0 - (y / height) * 2.0;
+        let bottom = 1.0 - ((y + h) / height) * 2.0;
+        let color = SELECTION_COLOR;
+        [
+            SelectionVertex {
+                position: [left, top],
+                color,
+            },
+            SelectionVertex {
+                position: [right, top],
+                color,
+            },
+            SelectionVertex {
+                position: [right, bottom],
+                color,
+            },
+            SelectionVertex {
+                position: [left, top],
+                color,
+            },
+            SelectionVertex {
+                position: [right, bottom],
+                color,
+            },
+            SelectionVertex {
+                position: [left, bottom],
+                color,
+            },
+        ]
     }
 
     fn update_layout_sizes(&mut self) {

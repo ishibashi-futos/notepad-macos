@@ -1498,6 +1498,7 @@ dependencies = [
 name = "notepad-macos"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "encoding_rs",
  "glyphon",
  "pollster",

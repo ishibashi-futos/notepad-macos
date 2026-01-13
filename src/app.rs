@@ -1210,6 +1210,44 @@ fn refresh_search_ui(
     ui.set_search(&search_text, visible);
     let nav_text = build_search_nav_text(core, search_state, search_query, search_preedit);
     ui.set_search_navigation(&nav_text, visible);
+    let selection_rects = build_selection_rects(ui, core);
+    ui.set_selection_rects(&selection_rects);
+}
+
+fn build_selection_spans(core: &Core) -> Vec<(usize, usize, usize)> {
+    let Some((start, end)) = core.selection_range() else {
+        return Vec::new();
+    };
+    let start_cursor = core.cursor_for_char(start);
+    let end_cursor = core.cursor_for_char(end);
+    let line_count = core.line_count().max(1);
+    let start_line = start_cursor.line.min(line_count - 1);
+    let end_line = end_cursor.line.min(line_count - 1);
+    let mut spans = Vec::new();
+    for line in start_line..=end_line {
+        let line_len = core.line_len_chars(line);
+        let (start_col, end_col) = if line == start_line && line == end_line {
+            (start_cursor.col, end_cursor.col)
+        } else if line == start_line {
+            (start_cursor.col, line_len)
+        } else if line == end_line {
+            (0, end_cursor.col)
+        } else {
+            (0, line_len)
+        };
+        if end_col > start_col {
+            spans.push((line, start_col, end_col));
+        }
+    }
+    spans
+}
+
+fn build_selection_rects(ui: &Ui, core: &Core) -> Vec<(f32, f32, f32, f32)> {
+    let spans = build_selection_spans(core);
+    spans
+        .into_iter()
+        .map(|(line, start_col, end_col)| ui.selection_rect(line, start_col, end_col))
+        .collect()
 }
 
 fn doc_label(doc: &Document) -> String {
@@ -1390,5 +1428,15 @@ mod tests {
             nav,
             "Matches: --/--  Searching... (Enter: next, Shift+Enter: prev)"
         );
+    }
+
+    #[test]
+    fn build_selection_spans_handles_multiline_selection() {
+        let mut core = Core::new();
+        core.insert_str("ab\ncd\nef");
+        core.set_cursor_line_col(0, 1, false);
+        core.set_cursor_line_col(1, 1, true);
+        let spans = build_selection_spans(&core);
+        assert_eq!(spans, vec![(0, 1, 2), (1, 0, 1)]);
     }
 }

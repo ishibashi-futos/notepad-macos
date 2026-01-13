@@ -170,6 +170,10 @@ impl Core {
         self.rope.len_lines()
     }
 
+    pub fn line_len_chars(&self, line: usize) -> usize {
+        line_len_chars(&self.rope, line)
+    }
+
     pub fn set_cursor_line_col(&mut self, line: usize, col: usize, extend: bool) -> bool {
         if self.rope.len_chars() == 0 {
             let before = self.cursor;
@@ -783,4 +787,13 @@ mod tests {
         assert!(!core.undo());
         assert_eq!(core.text(), "a");
     }
+
+    #[test]
+    fn line_len_chars_excludes_newline() {
+        let mut core = Core::new();
+        core.insert_str("ab\nc");
+        assert_eq!(core.line_len_chars(0), 2);
+        assert_eq!(core.line_len_chars(1), 1);
+    }
+
 }
