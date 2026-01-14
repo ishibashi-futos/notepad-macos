@@ -21,12 +21,14 @@ pub struct Ui {
     tab_buffer: Buffer,
     search_buffer: Buffer,
     search_nav_buffer: Buffer,
+    status_nav_buffer: Buffer,
     line_number_buffer: Buffer,
     buffer: Buffer,
     line_number_width: f32,
     line_number_digits: usize,
     search_visible: bool,
     search_nav_visible: bool,
+    status_nav_visible: bool,
     selection_rects: Vec<(f32, f32, f32, f32)>,
     selection_vertices: Vec<SelectionVertex>,
     selection_buffer: wgpu::Buffer,
@@ -46,6 +48,7 @@ const TAB_LINE_HEIGHT: f32 = 20.0;
 const TAB_BAR_HEIGHT: f32 = 28.0;
 const SEARCH_BAR_HEIGHT: f32 = 24.0;
 const SEARCH_NAV_HEIGHT: f32 = LINE_HEIGHT * 4.0;
+const STATUS_NAV_LINES: usize = 4;
 const SELECTION_COLOR: [f32; 4] = [0.2, 0.45, 0.9, 0.35];
 const SELECTION_SHADER: &str = r#"
 struct VertexInput {
@@ -237,6 +240,20 @@ impl Ui {
             Shaping::Advanced,
         );
 
+        let mut status_nav_buffer =
+            Buffer::new(&mut font_system, Metrics::new(TAB_FONT_SIZE, TAB_LINE_HEIGHT));
+        status_nav_buffer.set_size(
+            &mut font_system,
+            size.width as f32,
+            SEARCH_NAV_HEIGHT,
+        );
+        status_nav_buffer.set_text(
+            &mut font_system,
+            "",
+            Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+        );
+
         let line_number_digits = 1;
         let line_number_width = line_number_width_for_digits(line_number_digits);
         let mut line_number_buffer = Buffer::new(&mut font_system, Metrics::new(FONT_SIZE, LINE_HEIGHT));
@@ -271,12 +288,14 @@ impl Ui {
             tab_buffer,
             search_buffer,
             search_nav_buffer,
+            status_nav_buffer,
             line_number_buffer,
             buffer,
             line_number_width,
             line_number_digits,
             search_visible: false,
             search_nav_visible: false,
+            status_nav_visible: false,
             selection_rects: Vec::new(),
             selection_vertices: Vec::new(),
             selection_buffer,
@@ -373,6 +392,30 @@ impl Ui {
         );
     }
 
+    pub fn set_status_navigation(&mut self, text: &str, visible: bool) {
+        let visibility_changed = self.status_nav_visible != visible;
+        self.status_nav_visible = visible;
+        if visibility_changed {
+            self.update_layout_sizes();
+        }
+        let display_text = if visible && !text.is_empty() {
+            let mut padded = String::new();
+            for _ in 0..STATUS_NAV_LINES.saturating_sub(1) {
+                padded.push('\n');
+            }
+            padded.push_str(text);
+            padded
+        } else {
+            String::new()
+        };
+        self.status_nav_buffer.set_text(
+            &mut self.font_system,
+            &display_text,
+            Attrs::new().family(Family::Monospace),
+            Shaping::Advanced,
+        );
+    }
+
     pub fn set_selection_rects(&mut self, rects: &[(f32, f32, f32, f32)]) {
         self.selection_rects.clear();
         self.selection_rects.extend_from_slice(rects);
@@ -444,7 +487,7 @@ impl Ui {
                     width: self.size.width,
                     height: self.size.height,
                 },
-                if self.search_visible || self.search_nav_visible {
+                if self.search_visible || self.search_nav_visible || self.status_nav_visible {
                     vec![
                         TextArea {
                             buffer: &self.tab_buffer,
@@ -481,9 +524,22 @@ impl Ui {
                                 left: 0,
                                 top: search_nav_top as i32,
                                 right: self.size.width as i32,
-                                bottom: (self.size.height as f32 - PADDING_Y) as i32,
+                                bottom: self.size.height as i32,
                             },
                             default_color: Color::rgb(170, 190, 210),
+                        },
+                        TextArea {
+                            buffer: &self.status_nav_buffer,
+                            left: PADDING_X,
+                            top: search_nav_top,
+                            scale: 1.0,
+                            bounds: TextBounds {
+                                left: 0,
+                                top: search_nav_top as i32,
+                                right: self.size.width as i32,
+                                bottom: self.size.height as i32,
+                            },
+                            default_color: Color::rgb(220, 90, 90),
                         },
                         TextArea {
                             buffer: &self.line_number_buffer,
@@ -601,8 +657,8 @@ impl Ui {
     }
 
     fn content_bottom_inset(&self) -> f32 {
-        if self.search_nav_visible {
-            PADDING_Y + SEARCH_NAV_HEIGHT
+        if self.search_nav_visible || self.status_nav_visible {
+            SEARCH_NAV_HEIGHT
         } else {
             0.0
         }
@@ -617,7 +673,7 @@ impl Ui {
     }
 
     fn search_nav_top(&self) -> f32 {
-        self.size.height as f32 - SEARCH_NAV_HEIGHT - PADDING_Y
+        self.size.height as f32 - SEARCH_NAV_HEIGHT
     }
 
     fn update_selection_vertices(&mut self) {
@@ -704,6 +760,11 @@ impl Ui {
             SEARCH_BAR_HEIGHT,
         );
         self.search_nav_buffer.set_size(
+            &mut self.font_system,
+            self.size.width as f32,
+            SEARCH_NAV_HEIGHT,
+        );
+        self.status_nav_buffer.set_size(
             &mut self.font_system,
             self.size.width as f32,
             SEARCH_NAV_HEIGHT,

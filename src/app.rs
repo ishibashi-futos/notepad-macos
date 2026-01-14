@@ -1,13 +1,14 @@
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use encoding_rs::{Encoding, SHIFT_JIS, UTF_8};
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Event, Ime, MouseButton, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::WindowBuilder;
 
-use crate::core::{Core, CoreError, TextEncoding};
+use crate::core::{Core, CoreError, SystemError, SystemErrorKind, TextEncoding};
 use crate::ui::Ui;
 
 #[derive(Debug)]
@@ -17,7 +18,7 @@ enum AppEvent {
         doc_id: u64,
         request_id: u64,
         path: PathBuf,
-        result: Result<Vec<u8>, CoreError>,
+        result: Result<OpenPayload, CoreError>,
     },
     SaveResult {
         doc_id: u64,
@@ -32,6 +33,27 @@ enum AppEvent {
         query: String,
         matches: Vec<usize>,
     },
+}
+
+#[derive(Debug)]
+struct OpenPayload {
+    text: String,
+    encoding: TextEncoding,
+}
+
+#[derive(Debug, Clone)]
+struct StatusMessage {
+    text: String,
+    expires_at: Instant,
+}
+
+impl StatusMessage {
+    fn error(text: impl Into<String>, now: Instant) -> Self {
+        Self {
+            text: text.into(),
+            expires_at: now + Duration::from_secs(6),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -181,7 +203,7 @@ impl Document {
 pub struct App;
 
 impl App {
-    pub fn run() {
+    pub fn run(initial_path: Option<PathBuf>, initial_warning: Option<String>) {
         let event_loop = EventLoopBuilder::<AppEvent>::with_user_event()
             .build()
             .expect("failed to build event loop");
@@ -202,6 +224,19 @@ impl App {
         let mut search_preedit: Option<String> = None;
         let mut clipboard_history = ClipboardHistory::new(100);
         let mut fn_pressed = false;
+        let proxy = event_loop.create_proxy();
+        let mut next_request_id: u64 = 1;
+        let mut status_message = initial_warning.map(|text| StatusMessage::error(text, Instant::now()));
+
+        if let Some(path) = initial_path {
+            handle_initial_open(
+                &mut documents[active_doc_index],
+                path,
+                &proxy,
+                &mut next_request_id,
+                &mut status_message,
+            );
+        }
         refresh_ui(
             &mut ui,
             &documents,
@@ -210,11 +245,11 @@ impl App {
             search_preedit.as_deref(),
             search_active,
             &clipboard_history,
+            status_message.as_ref(),
         );
         update_title(&window, &documents[active_doc_index].core);
         update_ime_cursor_area(&window, &documents[active_doc_index].core, &ui);
 
-        let proxy = event_loop.create_proxy();
         let bg_proxy = proxy.clone();
         std::thread::spawn(move || {
             for tick in 0.. {
@@ -227,7 +262,6 @@ impl App {
 
         let mut needs_redraw = true;
         let mut modifiers = winit::keyboard::ModifiersState::default();
-        let mut next_request_id: u64 = 1;
         let mut cursor_position: Option<PhysicalPosition<f64>> = None;
 
         let result = event_loop.run(move |event, elwt| {
@@ -235,6 +269,19 @@ impl App {
             match event {
                 Event::UserEvent(AppEvent::BackgroundTick(tick)) => {
                     println!("[bg] tick={tick}");
+                    if clear_status_if_expired(&mut status_message) {
+                        refresh_ui(
+                            &mut ui,
+                            &documents,
+                            active_doc_index,
+                            &search_query,
+                            search_preedit.as_deref(),
+                            search_active,
+                            &clipboard_history,
+                            status_message.as_ref(),
+                        );
+                        needs_redraw = true;
+                    }
                 }
                 Event::UserEvent(AppEvent::OpenResult {
                     doc_id,
@@ -256,8 +303,11 @@ impl App {
                     }
                     doc.active_open_request = None;
                     match result {
-                        Ok(bytes) => match doc.core.load_from_bytes(&bytes) {
-                            Ok(_) => {
+                        Ok(payload) => match doc
+                            .core
+                            .load_from_text(&payload.text, payload.encoding)
+                        {
+                            Ok(()) => {
                                 doc.core.set_path(Some(path));
                                 if active_doc_id == doc_id {
                                     refresh_active = true;
@@ -265,9 +315,15 @@ impl App {
                                     refresh_only_tabs = true;
                                 }
                             }
-                            Err(err) => report_error(&err),
+                            Err(err) => {
+                                set_status_message(&mut status_message, err.describe());
+                                refresh_active = true;
+                            }
                         },
-                        Err(err) => report_error(&err),
+                        Err(err) => {
+                            set_status_message(&mut status_message, err.describe());
+                            refresh_active = true;
+                        }
                     }
                     if refresh_active {
                         if search_active || !search_query.is_empty() {
@@ -291,6 +347,7 @@ impl App {
                             search_preedit.as_deref(),
                             search_active,
                             &clipboard_history,
+                            status_message.as_ref(),
                         );
                         let doc = &documents[active_doc_index];
                         update_title(&window, &doc.core);
@@ -314,6 +371,7 @@ impl App {
                         .unwrap_or_default();
                     let mut refresh_tabs_only = false;
                     let mut refresh_title = false;
+                    let mut refresh_active = false;
                     let Some(doc) = documents.iter_mut().find(|doc| doc.id == doc_id) else {
                         return;
                     };
@@ -329,13 +387,28 @@ impl App {
                             }
                             refresh_tabs_only = true;
                         }
-                        Err(err) => report_error(&err),
+                        Err(err) => {
+                            set_status_message(&mut status_message, err.describe());
+                            refresh_active = true;
+                        }
                     }
                     if refresh_title {
                         let doc = &documents[active_doc_index];
                         update_title(&window, &doc.core);
                     }
-                    if refresh_tabs_only {
+                    if refresh_active {
+                        refresh_ui(
+                            &mut ui,
+                            &documents,
+                            active_doc_index,
+                            &search_query,
+                            search_preedit.as_deref(),
+                            search_active,
+                            &clipboard_history,
+                            status_message.as_ref(),
+                        );
+                        needs_redraw = true;
+                    } else if refresh_tabs_only {
                         refresh_tabs(&mut ui, &documents, active_doc_index);
                         needs_redraw = true;
                     }
@@ -369,6 +442,7 @@ impl App {
                             search_preedit.as_deref(),
                             search_active,
                             &clipboard_history,
+                            status_message.as_ref(),
                         );
                         needs_redraw = true;
                     }
@@ -416,6 +490,7 @@ impl App {
                                                 search_preedit.as_deref(),
                                                 search_active,
                                                 &clipboard_history,
+                                                status_message.as_ref(),
                                             );
                                             let doc = &documents[active_doc_index];
                                             update_title(&window, &doc.core);
@@ -480,6 +555,7 @@ impl App {
                                     search_preedit.as_deref(),
                                     search_active,
                                     &clipboard_history,
+                                    status_message.as_ref(),
                                 );
                                 needs_redraw = true;
                             } else {
@@ -523,6 +599,7 @@ impl App {
                                     search_preedit.as_deref(),
                                     search_active,
                                     &clipboard_history,
+                                    status_message.as_ref(),
                                 );
                                 let doc = &documents[active_doc_index];
                                 update_title(&window, &doc.core);
@@ -539,6 +616,7 @@ impl App {
                                 let mut changed = false;
                                 let mut search_dirty = false;
                                 let mut history_dirty = false;
+                                let mut status_dirty = false;
                                 let mut suppress_editor_input =
                                     search_active || clipboard_history.is_visible();
                                 let mut text_changed = false;
@@ -769,6 +847,7 @@ impl App {
                                             search_preedit.as_deref(),
                                             search_active,
                                             &clipboard_history,
+                                            status_message.as_ref(),
                                         );
                                         update_title(
                                             &window,
@@ -817,7 +896,11 @@ impl App {
                                                 history_dirty = true;
                                             }
                                             if let Err(err) = set_clipboard_text(&text) {
-                                                eprintln!("[clipboard] copy failed: {err}");
+                                                set_status_message(
+                                                    &mut status_message,
+                                                    format!("[clipboard] copy failed: {err}"),
+                                                );
+                                                status_dirty = true;
                                             }
                                         }
                                     }
@@ -841,7 +924,11 @@ impl App {
                                             documents[active_doc_index].core.selected_text()
                                         {
                                             if let Err(err) = set_clipboard_text(&text) {
-                                                eprintln!("[clipboard] cut failed: {err}");
+                                                set_status_message(
+                                                    &mut status_message,
+                                                    format!("[clipboard] cut failed: {err}"),
+                                                );
+                                                status_dirty = true;
                                             } else if documents[active_doc_index]
                                                 .core
                                                 .delete_selection()
@@ -879,6 +966,7 @@ impl App {
                                             search_preedit.as_deref(),
                                             search_active,
                                             &clipboard_history,
+                                            status_message.as_ref(),
                                         );
                                         update_title(
                                             &window,
@@ -925,6 +1013,7 @@ impl App {
                                             search_preedit.as_deref(),
                                             search_active,
                                             &clipboard_history,
+                                            status_message.as_ref(),
                                         );
                                         update_title(
                                             &window,
@@ -968,6 +1057,7 @@ impl App {
                                             search_preedit.as_deref(),
                                             search_active,
                                             &clipboard_history,
+                                            status_message.as_ref(),
                                         );
                                         update_title(
                                             &window,
@@ -1012,6 +1102,7 @@ impl App {
                                                     search_preedit.as_deref(),
                                                     search_active,
                                                     &clipboard_history,
+                                                    status_message.as_ref(),
                                                 );
                                                 update_title(
                                                     &window,
@@ -1170,6 +1261,7 @@ impl App {
                                         search_preedit.as_deref(),
                                         search_active,
                                         &clipboard_history,
+                                        status_message.as_ref(),
                                     );
                                     needs_redraw = true;
                                 }
@@ -1183,6 +1275,21 @@ impl App {
                                         search_preedit.as_deref(),
                                         search_active,
                                         &clipboard_history,
+                                        status_message.as_ref(),
+                                    );
+                                    needs_redraw = true;
+                                }
+
+                                if status_dirty && !changed && !search_dirty && !history_dirty {
+                                    refresh_ui(
+                                        &mut ui,
+                                        &documents,
+                                        active_doc_index,
+                                        &search_query,
+                                        search_preedit.as_deref(),
+                                        search_active,
+                                        &clipboard_history,
+                                        status_message.as_ref(),
                                     );
                                     needs_redraw = true;
                                 }
@@ -1196,6 +1303,7 @@ impl App {
                                         search_preedit.as_deref(),
                                         search_active,
                                         &clipboard_history,
+                                        status_message.as_ref(),
                                     );
                                     let doc = &documents[active_doc_index];
                                     update_title(&window, &doc.core);
@@ -1236,6 +1344,28 @@ fn pick_open_path() -> Option<PathBuf> {
     rfd::FileDialog::new().pick_file()
 }
 
+fn handle_initial_open(
+    doc: &mut Document,
+    path: PathBuf,
+    proxy: &EventLoopProxy<AppEvent>,
+    next_request_id: &mut u64,
+    status_message: &mut Option<StatusMessage>,
+) {
+    if path.exists() {
+        let request_id = *next_request_id;
+        *next_request_id += 1;
+        doc.active_open_request = Some(request_id);
+        start_open_task(proxy.clone(), doc.id, request_id, path);
+    } else {
+        set_status_message(
+            status_message,
+            format!("file not found: {}", path.display()),
+        );
+        doc.core.set_path(Some(path));
+        doc.core.set_encoding(TextEncoding::Utf8);
+    }
+}
+
 fn pick_save_path(current_path: Option<&std::path::Path>) -> Option<PathBuf> {
     let dialog = rfd::FileDialog::new();
     let dialog = if let Some(path) = current_path {
@@ -1254,7 +1384,11 @@ fn start_open_task(
 ) {
     std::thread::spawn(move || {
         let result = std::fs::read(&path)
-            .map_err(|err| CoreError::from_io(format!("read {}", path.display()), err));
+            .map_err(|err| CoreError::from_io(format!("read {}", path.display()), err))
+            .and_then(|bytes| {
+                decode_bytes(&bytes)
+                    .map(|(text, encoding)| OpenPayload { text, encoding })
+            });
         let _ = proxy.send_event(AppEvent::OpenResult {
             doc_id,
             request_id,
@@ -1355,6 +1489,7 @@ fn refresh_ui(
     search_preedit: Option<&str>,
     search_active: bool,
     clipboard_history: &ClipboardHistory,
+    status_message: Option<&StatusMessage>,
 ) {
     let doc = &documents[active_doc_index];
     let core = &doc.core;
@@ -1369,6 +1504,7 @@ fn refresh_ui(
         search_preedit,
         search_active,
         clipboard_history,
+        status_message,
     );
     refresh_tabs(ui, documents, active_doc_index);
 }
@@ -1476,19 +1612,26 @@ fn refresh_search_ui(
     search_preedit: Option<&str>,
     search_active: bool,
     clipboard_history: &ClipboardHistory,
+    status_message: Option<&StatusMessage>,
 ) {
     let search_text = build_search_bar_text(search_query, search_preedit);
     let search_visible = search_active || !search_query.is_empty();
     ui.set_search(&search_text, search_visible);
-    if clipboard_history.is_visible() {
-        if let Some(nav_text) = build_clipboard_nav_text(clipboard_history) {
-            ui.set_search_navigation(&nav_text, true);
-        } else {
-            ui.set_search_navigation("", false);
-        }
+    if let Some(status) = status_message {
+        ui.set_status_navigation(&status.text, true);
+        ui.set_search_navigation("", false);
     } else {
-        let nav_text = build_search_nav_text(core, search_state, search_query, search_preedit);
-        ui.set_search_navigation(&nav_text, search_visible);
+        ui.set_status_navigation("", false);
+        if clipboard_history.is_visible() {
+            if let Some(nav_text) = build_clipboard_nav_text(clipboard_history) {
+                ui.set_search_navigation(&nav_text, true);
+            } else {
+                ui.set_search_navigation("", false);
+            }
+        } else {
+            let nav_text = build_search_nav_text(core, search_state, search_query, search_preedit);
+            ui.set_search_navigation(&nav_text, search_visible);
+        }
     }
     let selection_rects = build_selection_rects(ui, core);
     ui.set_selection_rects(&selection_rects);
@@ -1664,8 +1807,56 @@ fn log_ime_event(ime: &Ime) {
     }
 }
 
-fn report_error(err: &CoreError) {
-    eprintln!("{}", err.describe());
+fn encoding_error(context: impl Into<String>) -> CoreError {
+    CoreError::System(SystemError {
+        kind: SystemErrorKind::Encoding,
+        context: context.into(),
+        retriable: false,
+    })
+}
+
+fn set_status_message(status: &mut Option<StatusMessage>, text: impl Into<String>) {
+    *status = Some(StatusMessage::error(text, Instant::now()));
+}
+
+fn clear_status_if_expired(status: &mut Option<StatusMessage>) -> bool {
+    let Some(message) = status.as_ref() else {
+        return false;
+    };
+    if Instant::now() >= message.expires_at {
+        *status = None;
+        return true;
+    }
+    false
+}
+
+fn decode_bytes(bytes: &[u8]) -> Result<(String, TextEncoding), CoreError> {
+    if let Some((encoding, bom_len)) = Encoding::for_bom(bytes) {
+        let payload = &bytes[bom_len..];
+        let text_encoding = TextEncoding::from_encoding(encoding).ok_or_else(|| {
+            encoding_error(format!("unsupported encoding: {}", encoding.name()))
+        })?;
+        let (decoded, _, had_errors) = encoding.decode(payload);
+        if had_errors {
+            return Err(encoding_error(format!(
+                "decode error with {}",
+                encoding.name()
+            )));
+        }
+        return Ok((decoded.into_owned(), text_encoding));
+    }
+
+    let (decoded, _, had_errors) = UTF_8.decode(bytes);
+    if !had_errors {
+        return Ok((decoded.into_owned(), TextEncoding::Utf8));
+    }
+
+    let (decoded, _, had_errors) = SHIFT_JIS.decode(bytes);
+    if !had_errors {
+        return Ok((decoded.into_owned(), TextEncoding::ShiftJis));
+    }
+
+    Err(encoding_error("failed to detect encoding".to_string()))
 }
 
 fn set_clipboard_text(text: &str) -> Result<(), arboard::Error> {
@@ -1853,5 +2044,30 @@ mod tests {
         assert_eq!(history.window_start, 2);
         let nav = build_clipboard_nav_text(&history).expect("nav");
         assert!(nav.contains("> [3] one"));
+    }
+
+    #[test]
+    fn decode_bytes_prefers_utf8_without_bom() {
+        let bytes = "hello".as_bytes();
+        let (text, encoding) = decode_bytes(bytes).expect("decode");
+        assert_eq!(text, "hello");
+        assert_eq!(encoding, TextEncoding::Utf8);
+    }
+
+    #[test]
+    fn decode_bytes_reads_utf8_bom() {
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice("hi".as_bytes());
+        let (text, encoding) = decode_bytes(&bytes).expect("decode");
+        assert_eq!(text, "hi");
+        assert_eq!(encoding, TextEncoding::Utf8);
+    }
+
+    #[test]
+    fn decode_bytes_falls_back_to_shift_jis() {
+        let (encoded, _, _) = SHIFT_JIS.encode("あ");
+        let (text, encoding) = decode_bytes(encoded.as_ref()).expect("decode");
+        assert_eq!(text, "あ");
+        assert_eq!(encoding, TextEncoding::ShiftJis);
     }
 }

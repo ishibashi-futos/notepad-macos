@@ -503,12 +503,8 @@ impl Core {
         true
     }
 
-    pub fn load_from_bytes(&mut self, bytes: &[u8]) -> Result<TextEncoding, CoreError> {
-        let (encoding, bom_len) = Encoding::for_bom(bytes).unwrap_or((UTF_8, 0));
-        let encoding = TextEncoding::from_encoding(encoding).unwrap_or(TextEncoding::Utf8);
-        let payload = &bytes[bom_len..];
-        let (decoded, _, _) = encoding.encoding().decode(payload);
-        self.rope = Rope::from_str(decoded.as_ref());
+    pub fn load_from_text(&mut self, text: &str, encoding: TextEncoding) -> Result<(), CoreError> {
+        self.rope = Rope::from_str(text);
         self.cursor = 0;
         self.selection_anchor = None;
         self.preedit = None;
@@ -516,7 +512,7 @@ impl Core {
         self.redo.clear();
         self.encoding = encoding;
         self.dirty = false;
-        Ok(encoding)
+        Ok(())
     }
 
     pub fn encode_text(text: &str, encoding: TextEncoding) -> Vec<u8> {
@@ -851,6 +847,19 @@ mod tests {
         core.insert_str("ab\nc");
         assert_eq!(core.line_len_chars(0), 2);
         assert_eq!(core.line_len_chars(1), 1);
+    }
+
+    #[test]
+    fn load_from_text_sets_content_and_encoding() {
+        let mut core = Core::new();
+        core.insert_str("dirty");
+        assert!(core.is_dirty());
+        core.load_from_text("hello", TextEncoding::ShiftJis)
+            .expect("load");
+        assert_eq!(core.text(), "hello");
+        assert_eq!(core.encoding(), TextEncoding::ShiftJis);
+        assert!(!core.is_dirty());
+        assert_eq!(core.cursor_char(), 0);
     }
 
 }
